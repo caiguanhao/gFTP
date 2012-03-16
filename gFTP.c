@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
+#include "ftpparse.c"
 
 GeanyPlugin *geany_plugin;
 GeanyData *geany_data;
@@ -16,6 +18,7 @@ enum
 {
 	FILEVIEW_COLUMN_ICON = 0,
 	FILEVIEW_COLUMN_NAME,
+	FILEVIEW_COLUMN_SIZE,
 	FILEVIEW_COLUMN_FILENAME,
 	FILEVIEW_N_COLUMNS
 };
@@ -24,23 +27,13 @@ static GtkWidget *box;
 static GtkWidget *file_view;
 static GtkWidget *url_entry;
 static GtkListStore *file_store;
-
 static CURL *curl;
+static char *current_url;
 
 struct string {
 	char *ptr;
 	int len;
 };
-
-char *ltrim(char *str)
-{
-	char *ptr;
-	int  len;
-	for (ptr = str; *ptr && isspace((int)*ptr); ++ptr);
-	len = strlen(ptr);
-	memmove(str, ptr, len + 1);
-	return str;
-}
 
 size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str)
 {
@@ -55,7 +48,7 @@ size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str)
 static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, void *userp)
 {
 	char * odata;
-	odata = ltrim(g_strdup_printf("%s", data));
+	odata = g_strstrip(g_strdup_printf("%s", data));
 	char * firstline;
 	firstline = strtok(odata,"\r\n");
 	int msgadd=0;
@@ -97,29 +90,70 @@ static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, vo
 	return 0;
 }
 
-static void add_item(const gchar *name)
+GList *filelist;
+GList *dirlist;
+
+static int add_item(gpointer data, gboolean is_dir)
 {
+	gchar **parts=g_regex_split_simple("\n", data, 0, 0);
+	if (strcmp(parts[0],".")==0||strcmp(parts[0],"..")==0) return 1;
 	GtkTreeIter iter;
 	gtk_list_store_append(file_store, &iter);
+	if (strcmp(parts[1],"1")==0) { // for links with file name like mozilla -> .
+		GRegex *regex;
+		regex = g_regex_new("\\s->\\s", 0, 0, NULL);
+		if (g_regex_match(regex, parts[0], 0, NULL)) {
+			gchar **nameparts=g_regex_split(regex, parts[0], 0);
+			sprintf(parts[0], "%s", nameparts[0]);
+			g_strfreev(nameparts);
+			sprintf(parts[1], "link");
+		}
+	}
 	gtk_list_store_set(file_store, &iter,
-	FILEVIEW_COLUMN_ICON, GTK_STOCK_DIRECTORY,
-	FILEVIEW_COLUMN_NAME, name,
-	FILEVIEW_COLUMN_FILENAME, name,
+	FILEVIEW_COLUMN_ICON, is_dir?GTK_STOCK_DIRECTORY:GTK_STOCK_FILE,
+	FILEVIEW_COLUMN_NAME, parts[0],
+	FILEVIEW_COLUMN_SIZE, parts[1],
+	FILEVIEW_COLUMN_FILENAME, parts[0],
 	-1);
-	
+	g_strfreev(parts);
+	return 0;
 }
 
-static void fill_list(const char *listdata)
+static int file_cmp(gconstpointer a, gconstpointer b)
+{
+	return g_ascii_strncasecmp(a, b, -1);
+}
+
+static void to_list(const char *listdata)
 {
 	char * odata;
 	odata = g_strdup_printf("%s", listdata);
 	char *pch;
 	pch = strtok(odata, "\r\n");
+	struct ftpparse ftp;
 	while (pch != NULL)
 	{
-		add_item(pch);
+		if (ftp_parse(&ftp, pch, strlen(pch))) {
+			char *fileinfo;
+			fileinfo = g_strdup_printf("%s\n%ld\n%lu", ftp.name, ftp.size, (unsigned long)ftp.mtime);
+			switch (ftp.flagtrycwd){
+				case 1:
+					dirlist = g_list_prepend(dirlist, fileinfo);
+					break;
+				default:
+					filelist = g_list_prepend(filelist, fileinfo);
+			}
+		}
 		pch = strtok(NULL, "\r\n");
 	}
+	dirlist = g_list_sort(dirlist, (GCompareFunc)file_cmp);
+	filelist = g_list_sort(filelist, (GCompareFunc)file_cmp);
+	g_list_foreach(dirlist, (GFunc)add_item, (gpointer)TRUE);
+	g_list_foreach(filelist, (GFunc)add_item, (gpointer)FALSE);
+	g_list_free(dirlist);
+	g_list_free(filelist);
+	dirlist=NULL;
+	filelist=NULL;
 }
 
 static void clear()
@@ -127,7 +161,7 @@ static void clear()
 	gtk_list_store_clear(file_store);
 }
 
-static void *connect_ftp_server(void *p)
+static void *connect_ftp_server(gpointer p)
 {
 	const char *url = (const char *)p;
 	if (curl) {
@@ -144,10 +178,10 @@ static void *connect_ftp_server(void *p)
 		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
 		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 		curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-		curl_easy_setopt(curl, CURLOPT_DIRLISTONLY, 1L);
+		//curl_easy_setopt(curl, CURLOPT_DIRLISTONLY, 1L);
 		curl_easy_perform(curl);
 		
-		fill_list(str.ptr);
+		to_list(str.ptr);
 		free(str.ptr);
 		
 		curl_easy_cleanup(curl);
@@ -163,32 +197,92 @@ static void *connect_ftp_server(void *p)
 
 static void on_connect_clicked(GtkButton *button, gpointer user_data)
 {
+	current_url=g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(url_entry)));
 	gtk_widget_set_sensitive(GTK_WIDGET(box), FALSE);
 	clear();
 	msgwin_clear_tab(MSG_MESSAGE);
 	msgwin_switch_tab(MSG_MESSAGE, TRUE);
 	msgwin_msg_add(COLOR_BLUE, -1, NULL, "%s", "Connecting...");
 	curl = curl_easy_init();
-	g_thread_create(&connect_ftp_server, (gpointer)gtk_entry_get_text(GTK_ENTRY(url_entry)), FALSE, NULL);
+	g_thread_create(&connect_ftp_server, (gpointer)current_url, FALSE, NULL);
+}
+
+static void on_open_clicked(GtkMenuItem *menuitem, gpointer user_data)
+{
+	GtkTreeSelection *treesel;
+	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
+	GList *list;
+	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
+	list = gtk_tree_selection_get_selected_rows(treesel, &model);
+	
+	GtkTreePath *treepath = list->data;
+	GtkTreeIter iter;
+	gtk_tree_model_get_iter(model, &iter, treepath);
+	gchar *name;
+	gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_FILENAME, &name, -1);
+	
+	sprintf(current_url, "%s%s/", current_url, name);
+	g_free(name);
+	g_list_free(list);
+	
+	gtk_entry_set_text(GTK_ENTRY(url_entry), current_url);
+	on_connect_clicked(NULL, NULL);
+}
+
+static GtkWidget *create_popup_menu(void)
+{
+	GtkWidget *item, *menu;
+	
+	menu = gtk_menu_new();
+	
+	item = gtk_image_menu_item_new_from_stock(GTK_STOCK_OPEN, NULL);
+	gtk_widget_show(item);
+	gtk_container_add(GTK_CONTAINER(menu), item);
+	g_signal_connect(item, "activate", G_CALLBACK(on_open_clicked), NULL);
+	
+	return menu;
+}
+
+static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+{
+	if (event->button == 1 && event->type == GDK_2BUTTON_PRESS) {
+		on_open_clicked(NULL, NULL);
+		return TRUE;
+	} else if (event->button == 3) {
+		static GtkWidget *popup_menu = NULL;
+		if (popup_menu==NULL) popup_menu = create_popup_menu();
+		gtk_menu_popup(GTK_MENU(popup_menu), NULL, NULL, NULL, NULL, event->button, event->time);
+	}
+	return FALSE;
 }
 
 static void prepare_file_view()
 {
-	file_store = gtk_list_store_new(FILEVIEW_N_COLUMNS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+	file_store = gtk_list_store_new(FILEVIEW_N_COLUMNS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 	gtk_tree_view_set_model(GTK_TREE_VIEW(file_view), GTK_TREE_MODEL(file_store));
 	g_object_unref(file_store);
 	
 	GtkCellRenderer *text_renderer, *icon_renderer;
 	GtkTreeViewColumn *column;
-	icon_renderer = gtk_cell_renderer_pixbuf_new();
-	text_renderer = gtk_cell_renderer_text_new();
 	column = gtk_tree_view_column_new();
+	icon_renderer = gtk_cell_renderer_pixbuf_new();
 	gtk_tree_view_column_pack_start(column, icon_renderer, FALSE);
 	gtk_tree_view_column_set_attributes(column, icon_renderer, "stock-id", FILEVIEW_COLUMN_ICON, NULL);
+	text_renderer = gtk_cell_renderer_text_new();
 	gtk_tree_view_column_pack_start(column, text_renderer, TRUE);
 	gtk_tree_view_column_set_attributes(column, text_renderer, "text", FILEVIEW_COLUMN_NAME, NULL);
+	text_renderer = gtk_cell_renderer_text_new();
+	g_object_set(text_renderer, "xalign", 1.0, NULL);
+	gtk_tree_view_column_pack_start(column, text_renderer, FALSE);
+	gtk_tree_view_column_set_attributes(column, text_renderer, "text", FILEVIEW_COLUMN_SIZE, NULL);
 	gtk_tree_view_append_column(GTK_TREE_VIEW(file_view), column);
 	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(file_view), FALSE);
+	
+	PangoFontDescription *pfd = pango_font_description_new();
+	pango_font_description_set_size(pfd, 8 * PANGO_SCALE);
+	gtk_widget_modify_font(file_view, pfd);
+	
+	g_signal_connect(file_view, "button-press-event", G_CALLBACK(on_button_press), NULL);
 }
 
 void plugin_init(GeanyData *data)
