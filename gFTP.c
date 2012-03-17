@@ -28,7 +28,10 @@ static GtkWidget *file_view;
 static GtkWidget *url_entry;
 static GtkListStore *file_store;
 static CURL *curl;
-static char *current_url;
+static gchar *current_url = NULL;
+
+GList *filelist;
+GList *dirlist;
 
 struct string {
 	char *ptr;
@@ -90,8 +93,36 @@ static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, vo
 	return 0;
 }
 
-GList *filelist;
-GList *dirlist;
+static gboolean is_single_selection(GtkTreeSelection *treesel)
+{
+	if (gtk_tree_selection_count_selected_rows(treesel) == 1)
+		return TRUE;
+
+	ui_set_statusbar(FALSE, _("Too many items selected!"));
+	return FALSE;
+}
+
+static gboolean is_folder_selected(GList *selected_items)
+{
+	GList *item;
+	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
+	gboolean dir_found = FALSE;
+	for (item = selected_items; item != NULL; item = g_list_next(item)) {
+		gchar *icon;
+		GtkTreeIter iter;
+		GtkTreePath *treepath;
+		treepath = (GtkTreePath*) item->data;
+		gtk_tree_model_get_iter(model, &iter, treepath);
+		gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, -1);
+		if (utils_str_equal(icon, GTK_STOCK_DIRECTORY))	{
+			dir_found = TRUE;
+			g_free(icon);
+			break;
+		}
+		g_free(icon);
+	}
+	return dir_found;
+}
 
 static int add_item(gpointer data, gboolean is_dir)
 {
@@ -108,12 +139,14 @@ static int add_item(gpointer data, gboolean is_dir)
 			g_strfreev(nameparts);
 			sprintf(parts[1], "link");
 		}
+	} else if (strcmp(parts[1],"0")==0 && is_dir) {
+		sprintf(parts[1], "%s", "");
 	}
 	gtk_list_store_set(file_store, &iter,
 	FILEVIEW_COLUMN_ICON, is_dir?GTK_STOCK_DIRECTORY:GTK_STOCK_FILE,
 	FILEVIEW_COLUMN_NAME, parts[0],
 	FILEVIEW_COLUMN_SIZE, parts[1],
-	FILEVIEW_COLUMN_FILENAME, parts[0],
+	FILEVIEW_COLUMN_FILENAME, g_strconcat(current_url, parts[0], "/", NULL),
 	-1);
 	g_strfreev(parts);
 	return 0;
@@ -198,11 +231,24 @@ static void *connect_ftp_server(gpointer p)
 static void on_connect_clicked(GtkButton *button, gpointer user_data)
 {
 	current_url=g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(url_entry)));
+	if (!g_regex_match_simple("^ftp://", current_url, G_REGEX_CASELESS, 0)) {
+		current_url=g_strconcat("ftp://", current_url, NULL);
+	}
+	if (!g_str_has_suffix(current_url, "/")) {
+		current_url=g_strconcat(current_url, "/", NULL);
+	}
+	gtk_entry_set_text(GTK_ENTRY(url_entry), current_url);
 	gtk_widget_set_sensitive(GTK_WIDGET(box), FALSE);
+	
 	clear();
+	
+	gtk_paned_set_position(GTK_PANED(ui_lookup_widget(geany->main_widgets->window, "vpaned1")), 
+		geany->main_widgets->window->allocation.height - 250);
+	
 	msgwin_clear_tab(MSG_MESSAGE);
 	msgwin_switch_tab(MSG_MESSAGE, TRUE);
 	msgwin_msg_add(COLOR_BLUE, -1, NULL, "%s", "Connecting...");
+	
 	curl = curl_easy_init();
 	g_thread_create(&connect_ftp_server, (gpointer)current_url, FALSE, NULL);
 }
@@ -215,14 +261,20 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer user_data)
 	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
 	list = gtk_tree_selection_get_selected_rows(treesel, &model);
 	
-	GtkTreePath *treepath = list->data;
-	GtkTreeIter iter;
-	gtk_tree_model_get_iter(model, &iter, treepath);
-	gchar *name;
-	gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_FILENAME, &name, -1);
-	
-	sprintf(current_url, "%s%s/", current_url, name);
-	g_free(name);
+	if (is_folder_selected(list)) {
+		if (is_single_selection(treesel)) {
+			GtkTreePath *treepath = list->data;
+			GtkTreeIter iter;
+			gtk_tree_model_get_iter(model, &iter, treepath);
+			gchar *name;
+			gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_FILENAME, &name, -1);
+			current_url=g_strdup_printf("%s", name);
+			g_free(name);
+		}
+	} else {
+		
+	}
+	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
 	g_list_free(list);
 	
 	gtk_entry_set_text(GTK_ENTRY(url_entry), current_url);
@@ -256,6 +308,16 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
 	return FALSE;
 }
 
+static void on_go_up(void)
+{
+	gsize len = strlen(current_url);
+	if (current_url[len-1] == G_DIR_SEPARATOR)
+		current_url[len-1] = '\0';
+	current_url=g_path_get_dirname(current_url);
+	gtk_entry_set_text(GTK_ENTRY(url_entry), current_url);
+	on_connect_clicked(NULL, NULL);
+}
+
 static void prepare_file_view()
 {
 	file_store = gtk_list_store_new(FILEVIEW_N_COLUMNS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
@@ -282,7 +344,25 @@ static void prepare_file_view()
 	pango_font_description_set_size(pfd, 8 * PANGO_SCALE);
 	gtk_widget_modify_font(file_view, pfd);
 	
+	gtk_tree_view_set_tooltip_column(GTK_TREE_VIEW(file_view), FILEVIEW_COLUMN_FILENAME);
+	
 	g_signal_connect(file_view, "button-press-event", G_CALLBACK(on_button_press), NULL);
+}
+
+static GtkWidget *make_toolbar(void)
+{
+	GtkWidget *wid, *toolbar;
+	
+	toolbar = gtk_toolbar_new();
+	gtk_toolbar_set_icon_size(GTK_TOOLBAR(toolbar), GTK_ICON_SIZE_MENU);
+	gtk_toolbar_set_style(GTK_TOOLBAR(toolbar), GTK_TOOLBAR_ICONS);
+	
+	wid = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_GO_UP));
+	gtk_widget_set_tooltip_text(wid, "Go Up");
+	g_signal_connect(wid, "clicked", G_CALLBACK(on_go_up), NULL);
+	gtk_container_add(GTK_CONTAINER(toolbar), wid);
+	
+	return toolbar;
 }
 
 void plugin_init(GeanyData *data)
@@ -297,10 +377,13 @@ void plugin_init(GeanyData *data)
 	
 	box = gtk_vbox_new(FALSE, 0);
 	
-	url_entry = gtk_entry_new_with_buffer(gtk_entry_buffer_new("ftp.mozilla.org/pub/",-1));
+	url_entry = gtk_entry_new_with_buffer(gtk_entry_buffer_new("ftp.microsoft.com",-1));
 	gtk_box_pack_start(GTK_BOX(box), url_entry, FALSE, FALSE, 0);
 	
 	GtkWidget *widget;
+	
+	widget = make_toolbar();
+	gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
 	
 	widget = gtk_button_new_with_label("Connect");
 	gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
