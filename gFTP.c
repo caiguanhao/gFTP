@@ -26,8 +26,9 @@ enum
 static GtkWidget *box;
 static GtkWidget *file_view;
 static GtkWidget *url_entry;
-static GtkWidget *btn_connect, *btn_go_up;
-static GtkListStore *file_store;
+static GtkWidget *btn_connect;
+static GtkTreeStore *file_store;
+static GtkTreeIter parent;
 static CURL *curl;
 static gchar *current_url = NULL;
 
@@ -59,41 +60,39 @@ static void msgwin_scroll_to_bottom()
 	gtk_tree_view_scroll_to_cell(MsgWin, path, NULL, FALSE, 0.0, 0.0);
 }
 
+static void log_new_str(int color, char *text)
+{
+	msgwin_msg_add(color, -1, NULL, "%s", text);
+	msgwin_scroll_to_bottom();
+}
+
 static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, void *userp)
 {
 	char * odata;
 	odata = g_strstrip(g_strdup_printf("%s", data));
 	char * firstline;
 	firstline = strtok(odata,"\r\n");
-	int msgadd=0;
 	gdk_threads_enter();
 	switch (type) {
 		case CURLINFO_TEXT:
-			msgwin_msg_add(COLOR_BLUE, -1, NULL, "%s", firstline);
-			msgadd=1;
+			log_new_str(COLOR_BLUE, firstline);
 			break;
 		default:
 			break;
 		case CURLINFO_HEADER_OUT:
-			msgwin_msg_add(COLOR_BLUE, -1, NULL, "%s", firstline);
-			msgadd=1;
+			log_new_str(COLOR_BLUE, firstline);
 			break;
 		case CURLINFO_DATA_OUT:
 			break;
 		case CURLINFO_SSL_DATA_OUT:
 			break;
 		case CURLINFO_HEADER_IN:
-			msgwin_msg_add(COLOR_BLACK, -1, NULL, "%s", firstline);
-			msgadd=1;
+			log_new_str(COLOR_BLACK, firstline);
 			break;
 		case CURLINFO_DATA_IN:
 			break;
 		case CURLINFO_SSL_DATA_IN:
 			break;
-	}
-	
-	if (msgadd==1) {
-		msgwin_scroll_to_bottom();
 	}
 	gdk_threads_leave();
 	return 0;
@@ -135,20 +134,23 @@ static int add_item(gpointer data, gboolean is_dir)
 	gchar **parts=g_regex_split_simple("\n", data, 0, 0);
 	if (strcmp(parts[0],".")==0||strcmp(parts[0],"..")==0) return 1;
 	GtkTreeIter iter;
-	gtk_list_store_append(file_store, &iter);
-	if (strcmp(parts[1],"1")==0) { // for links with file name like mozilla -> .
+	gtk_tree_store_append(file_store, &iter, gtk_tree_store_iter_is_valid(file_store, &parent)?&parent:NULL);
+	if (is_dir) {
 		GRegex *regex;
 		regex = g_regex_new("\\s->\\s", 0, 0, NULL);
 		if (g_regex_match(regex, parts[0], 0, NULL)) {
 			gchar **nameparts=g_regex_split(regex, parts[0], 0);
-			sprintf(parts[0], "%s", nameparts[0]);
+			if (g_strcmp0(parts[1],g_strdup_printf("%ld",g_utf8_strlen(nameparts[1],-1)))==0) {
+				sprintf(parts[0], "%s", nameparts[0]);
+				sprintf(parts[1], "link");
+			}
 			g_strfreev(nameparts);
-			sprintf(parts[1], "link");
 		}
-	} else if (strcmp(parts[1],"0")==0 && is_dir) {
-		sprintf(parts[1], "%s", "");
+		if (strcmp(parts[1],"0")==0) {
+			sprintf(parts[1], "%s", "");
+		}
 	}
-	gtk_list_store_set(file_store, &iter,
+	gtk_tree_store_set(file_store, &iter,
 	FILEVIEW_COLUMN_ICON, is_dir?GTK_STOCK_DIRECTORY:GTK_STOCK_FILE,
 	FILEVIEW_COLUMN_NAME, parts[0],
 	FILEVIEW_COLUMN_SIZE, parts[1],
@@ -161,6 +163,11 @@ static int add_item(gpointer data, gboolean is_dir)
 static int file_cmp(gconstpointer a, gconstpointer b)
 {
 	return g_ascii_strncasecmp(a, b, -1);
+}
+
+static void clear()
+{
+	gtk_tree_store_clear(file_store);
 }
 
 static int to_list(const char *listdata)
@@ -194,19 +201,15 @@ static int to_list(const char *listdata)
 	g_list_free(filelist);
 	dirlist=NULL;
 	filelist=NULL;
+	if (gtk_tree_store_iter_is_valid(file_store, &parent))
+		gtk_tree_view_expand_row(GTK_TREE_VIEW(file_view), gtk_tree_model_get_path(GTK_TREE_MODEL(file_store), &parent), FALSE);
 	return 0;
-}
-
-static void clear()
-{
-	gtk_list_store_clear(file_store);
 }
 
 static void *disconnect(gpointer p)
 {
 	if (curl) {
-		msgwin_msg_add(COLOR_RED, -1, NULL, "%s", "Disconnected.");
-		msgwin_scroll_to_bottom();
+		log_new_str(COLOR_RED, "Disconnected.");
 		curl = NULL;
 	}
 	clear();
@@ -234,7 +237,6 @@ static void *connect_ftp_server(gpointer p)
 	}
 	if (to_list(str.ptr)==0) {
 		gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_DISCONNECT);
-		gtk_widget_set_sensitive(btn_go_up, TRUE);
 	} else {
 		curl_easy_cleanup(curl);
 		disconnect(NULL);
@@ -249,40 +251,9 @@ static void *connect_ftp_server(gpointer p)
 
 static void *to_connect(gpointer p)
 {
-	clear();
 	gtk_widget_set_sensitive(GTK_WIDGET(box), FALSE);
 	g_thread_create(&connect_ftp_server, (gpointer)p, FALSE, NULL);
 	return NULL;
-}
-
-static void on_connect_clicked(gpointer p)
-{
-	if (!curl) {
-		current_url=g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(url_entry)));
-		if (!g_regex_match_simple("^ftp://", current_url, G_REGEX_CASELESS, 0)) {
-			current_url=g_strconcat("ftp://", current_url, NULL);
-		}
-		if (!g_str_has_suffix(current_url, "/")) {
-			current_url=g_strconcat(current_url, "/", NULL);
-		}
-		gtk_entry_set_text(GTK_ENTRY(url_entry), current_url);
-		
-		gtk_paned_set_position(GTK_PANED(ui_lookup_widget(geany->main_widgets->window, "vpaned1")), 
-			geany->main_widgets->window->allocation.height - 250);
-		
-		msgwin_clear_tab(MSG_MESSAGE);
-		msgwin_switch_tab(MSG_MESSAGE, TRUE);
-		msgwin_msg_add(COLOR_BLUE, -1, NULL, "%s", "Connecting...");
-		
-		curl = curl_easy_init();
-		
-		to_connect(current_url);
-		
-	} else {
-		disconnect(NULL);
-		gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_CONNECT);
-		gtk_widget_set_sensitive(btn_go_up, FALSE);
-	}
 }
 
 static void on_open_clicked(GtkMenuItem *menuitem, gpointer user_data)
@@ -298,6 +269,7 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer user_data)
 			GtkTreePath *treepath = list->data;
 			GtkTreeIter iter;
 			gtk_tree_model_get_iter(model, &iter, treepath);
+			gtk_tree_model_get_iter(model, &parent, treepath);
 			gchar *name;
 			gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_FILENAME, &name, -1);
 			current_url=g_strdup_printf("%s", name);
@@ -311,6 +283,46 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer user_data)
 	
 	gtk_entry_set_text(GTK_ENTRY(url_entry), current_url);
 	to_connect(current_url);
+}
+
+static void on_connect_clicked(gpointer p)
+{
+	if (!curl) {
+		current_url=g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(url_entry)));
+		current_url=g_strstrip(current_url);
+		if (!g_regex_match_simple("^ftp://", current_url, G_REGEX_CASELESS, 0)) {
+			current_url=g_strconcat("ftp://", current_url, NULL);
+		}
+		if (!g_str_has_suffix(current_url, "/")) {
+			current_url=g_strconcat(current_url, "/", NULL);
+		}
+		gtk_entry_set_text(GTK_ENTRY(url_entry), current_url);
+		
+		gtk_paned_set_position(GTK_PANED(ui_lookup_widget(geany->main_widgets->window, "vpaned1")), 
+			geany->main_widgets->window->allocation.height - 250);
+		
+		msgwin_clear_tab(MSG_MESSAGE);
+		msgwin_switch_tab(MSG_MESSAGE, TRUE);
+		log_new_str(COLOR_BLUE, "Connecting...");
+		
+		GtkTreeIter iter;
+		gtk_tree_store_append(file_store, &iter, NULL);
+		gtk_tree_store_set(file_store, &iter,
+		FILEVIEW_COLUMN_ICON, GTK_STOCK_DIRECTORY,
+		FILEVIEW_COLUMN_NAME, current_url,
+		FILEVIEW_COLUMN_SIZE, "-1",
+		FILEVIEW_COLUMN_FILENAME, current_url,
+		-1);
+		gtk_tree_view_set_cursor(GTK_TREE_VIEW(file_view), gtk_tree_model_get_path(GTK_TREE_MODEL(file_store), &iter), NULL, FALSE);
+		
+		curl = curl_easy_init();
+		
+		on_open_clicked(NULL, NULL);
+		
+	} else {
+		disconnect(NULL);
+		gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_CONNECT);
+	}
 }
 
 static GtkWidget *create_popup_menu(void)
@@ -340,16 +352,6 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
 	return FALSE;
 }
 
-static void on_go_up(void)
-{
-	gsize len = strlen(current_url);
-	if (current_url[len-1] == G_DIR_SEPARATOR)
-		current_url[len-1] = '\0';
-	current_url=g_strconcat(g_path_get_dirname(current_url), "/", NULL);
-	gtk_entry_set_text(GTK_ENTRY(url_entry), current_url);
-	to_connect(current_url);
-}
-
 static void on_edit_preferences(void)
 {
 	plugin_show_configure(geany_plugin);
@@ -357,7 +359,7 @@ static void on_edit_preferences(void)
 
 static void prepare_file_view()
 {
-	file_store = gtk_list_store_new(FILEVIEW_N_COLUMNS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+	file_store = gtk_tree_store_new(FILEVIEW_N_COLUMNS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 	gtk_tree_view_set_model(GTK_TREE_VIEW(file_view), GTK_TREE_MODEL(file_store));
 	g_object_unref(file_store);
 	
@@ -370,10 +372,10 @@ static void prepare_file_view()
 	text_renderer = gtk_cell_renderer_text_new();
 	gtk_tree_view_column_pack_start(column, text_renderer, TRUE);
 	gtk_tree_view_column_set_attributes(column, text_renderer, "text", FILEVIEW_COLUMN_NAME, NULL);
-	text_renderer = gtk_cell_renderer_text_new();
-	g_object_set(text_renderer, "xalign", 1.0, NULL);
-	gtk_tree_view_column_pack_start(column, text_renderer, FALSE);
-	gtk_tree_view_column_set_attributes(column, text_renderer, "text", FILEVIEW_COLUMN_SIZE, NULL);
+	//text_renderer = gtk_cell_renderer_text_new();
+	//g_object_set(text_renderer, "xalign", 1.0, NULL);
+	//gtk_tree_view_column_pack_start(column, text_renderer, FALSE);
+	//gtk_tree_view_column_set_attributes(column, text_renderer, "text", FILEVIEW_COLUMN_SIZE, NULL);
 	gtk_tree_view_append_column(GTK_TREE_VIEW(file_view), column);
 	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(file_view), FALSE);
 	
@@ -399,13 +401,7 @@ static GtkWidget *make_toolbar(void)
 	//gtk_widget_set_sensitive(btn_connect, FALSE);
 	g_signal_connect(btn_connect, "clicked", G_CALLBACK(on_connect_clicked), NULL);
 	gtk_container_add(GTK_CONTAINER(toolbar), btn_connect);
-	
-	btn_go_up = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_GO_UP));
-	gtk_widget_set_tooltip_text(btn_go_up, "Go Up");
-	gtk_widget_set_sensitive(btn_go_up, FALSE);
-	g_signal_connect(btn_go_up, "clicked", G_CALLBACK(on_go_up), NULL);
-	gtk_container_add(GTK_CONTAINER(toolbar), btn_go_up);
-	
+		
 	wid = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_PREFERENCES));
 	gtk_widget_set_tooltip_text(wid, "Preferences");
 	g_signal_connect(wid, "clicked", G_CALLBACK(on_edit_preferences), NULL);
@@ -426,7 +422,7 @@ void plugin_init(GeanyData *data)
 	
 	box = gtk_vbox_new(FALSE, 0);
 	
-	url_entry = gtk_entry_new_with_buffer(gtk_entry_buffer_new("ftp.microsoft.com",-1));
+	url_entry = gtk_entry_new_with_buffer(gtk_entry_buffer_new("137.189.4.14",-1));
 	gtk_box_pack_start(GTK_BOX(box), url_entry, FALSE, FALSE, 0);
 	
 	GtkWidget *widget;
