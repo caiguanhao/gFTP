@@ -50,6 +50,24 @@ size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str)
 	return size*nmemb;
 }
 
+size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream)
+{
+	return fwrite(ptr, size, nmemb, stream);
+}
+
+static int download_progress (void *p, double dltotal, double dlnow, double ultotal, double ulnow)
+{
+	gdk_threads_enter();
+	double done=0.0;
+	if(dlnow!=0&&dltotal!=0)done=(double)dlnow/dltotal;
+	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), done);
+	gchar *doneper = g_strdup_printf("%.2f%%", done*100);
+	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
+	g_free(doneper);
+	gdk_threads_leave();
+	return 0;
+}
+
 static void msgwin_scroll_to_bottom()
 {
 	GtkTreeView *MsgWin;
@@ -154,7 +172,7 @@ static int add_item(gpointer data, gboolean is_dir)
 	FILEVIEW_COLUMN_ICON, is_dir?GTK_STOCK_DIRECTORY:GTK_STOCK_FILE,
 	FILEVIEW_COLUMN_NAME, parts[0],
 	FILEVIEW_COLUMN_SIZE, parts[1],
-	FILEVIEW_COLUMN_FILENAME, g_strconcat(current_url, parts[0], "/", NULL),
+	FILEVIEW_COLUMN_FILENAME, g_strconcat(current_url, parts[0], is_dir?"/":"", NULL),
 	-1);
 	g_strfreev(parts);
 	return 0;
@@ -216,7 +234,38 @@ static void *disconnect(gpointer p)
 	return NULL;
 }
 
-static void *connect_ftp_server(gpointer p)
+static void *download_file(gpointer p)
+{
+	const char *url = (const char *)p;
+	char *filepath;
+	if (curl) {
+		FILE *fp;
+		char *filedir = g_strdup_printf("%s/gFTP/",(char *)g_get_tmp_dir());
+		g_mkdir_with_parents(filedir, 0777);
+		filepath = g_strdup_printf("%s%s", filedir, g_path_get_basename(url));
+		fp=fopen(filepath,"wb");
+		curl_easy_setopt(curl, CURLOPT_URL, url);
+		//curl_easy_setopt(curl, CURLOPT_USERPWD, "");
+		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
+		curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+		curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, download_progress);
+		curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
+		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0);
+		curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+		//curl_easy_setopt(curl, CURLOPT_DIRLISTONLY, 1L);
+		curl_easy_perform(curl);
+		fclose(fp);
+	}
+	gdk_threads_enter();
+	if (filepath) document_open_file(filepath, FALSE, NULL, NULL);
+	gtk_widget_set_sensitive(GTK_WIDGET(box), TRUE);
+	gtk_widget_hide(geany->main_widgets->progressbar);
+	gdk_threads_leave();
+	g_thread_exit(NULL);
+	return NULL;
+}
+
+static void *get_dir_listing(gpointer p)
 {
 	const char *url = (const char *)p;
 	struct string str;
@@ -238,21 +287,32 @@ static void *connect_ftp_server(gpointer p)
 	if (to_list(str.ptr)==0) {
 		gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_DISCONNECT);
 	} else {
-		curl_easy_cleanup(curl);
-		disconnect(NULL);
+		gdk_threads_enter();
+		dialogs_show_msgbox(GTK_MESSAGE_INFO, "This is an empty directory.");
+		gdk_threads_leave();
 	}
 	free(str.ptr);
 	gdk_threads_enter();
 	gtk_widget_set_sensitive(GTK_WIDGET(box), TRUE);
+	ui_progress_bar_stop();
 	gdk_threads_leave();
 	g_thread_exit(NULL);
 	return NULL;
 }
 
-static void *to_connect(gpointer p)
+static void *to_download_file(gpointer p)
 {
 	gtk_widget_set_sensitive(GTK_WIDGET(box), FALSE);
-	g_thread_create(&connect_ftp_server, (gpointer)p, FALSE, NULL);
+	gtk_widget_show(geany->main_widgets->progressbar);
+	g_thread_create(&download_file, (gpointer)p, FALSE, NULL);
+	return NULL;
+}
+
+static void *to_get_dir_listing(gpointer p)
+{
+	gtk_widget_set_sensitive(GTK_WIDGET(box), FALSE);
+	ui_progress_bar_start("Please wait...");
+	g_thread_create(&get_dir_listing, (gpointer)p, FALSE, NULL);
 	return NULL;
 }
 
@@ -264,25 +324,25 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer user_data)
 	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
 	list = gtk_tree_selection_get_selected_rows(treesel, &model);
 	
-	if (is_folder_selected(list)) {
-		if (is_single_selection(treesel)) {
-			GtkTreePath *treepath = list->data;
-			GtkTreeIter iter;
-			gtk_tree_model_get_iter(model, &iter, treepath);
+	if (is_single_selection(treesel)) {
+		GtkTreePath *treepath = list->data;
+		GtkTreeIter iter;
+		gtk_tree_model_get_iter(model, &iter, treepath);
+		gchar *name;
+		gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_FILENAME, &name, -1);
+		current_url=g_strdup_printf("%s", name);
+		if (is_folder_selected(list)) {
 			gtk_tree_model_get_iter(model, &parent, treepath);
-			gchar *name;
-			gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_FILENAME, &name, -1);
-			current_url=g_strdup_printf("%s", name);
-			g_free(name);
+			gtk_entry_set_text(GTK_ENTRY(url_entry), current_url);
+			to_get_dir_listing(current_url);
+		} else {
+			to_download_file(current_url);
 		}
-	} else {
-		
+		g_free(name);
 	}
 	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
 	g_list_free(list);
 	
-	gtk_entry_set_text(GTK_ENTRY(url_entry), current_url);
-	to_connect(current_url);
 }
 
 static void on_connect_clicked(gpointer p)
