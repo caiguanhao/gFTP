@@ -194,6 +194,16 @@ static int file_cmp(gconstpointer a, gconstpointer b)
 	return g_ascii_strncasecmp(a, b, -1);
 }
 
+static void clear_children()
+{
+	gdk_threads_enter();
+	GtkTreeIter child;
+	if (gtk_tree_store_iter_is_valid(file_store, &parent) && gtk_tree_model_iter_children(GTK_TREE_MODEL(file_store), &child, &parent)) {
+		while (gtk_tree_store_remove(file_store, &child)) {}
+	}
+	gdk_threads_leave();
+}
+
 static void clear()
 {
 	gtk_tree_store_clear(file_store);
@@ -261,7 +271,7 @@ static void *download_file(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
 		curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, download_progress);
 		curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
-		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0);
+		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 		curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
 		//curl_easy_setopt(curl, CURLOPT_DIRLISTONLY, 1L);
 		curl_easy_perform(curl);
@@ -278,6 +288,7 @@ static void *download_file(gpointer p)
 
 static void *get_dir_listing(gpointer p)
 {
+	clear_children();
 	const char *url = (const char *)p;
 	struct string str;
 	str.len = 0;
