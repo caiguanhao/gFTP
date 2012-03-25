@@ -80,7 +80,18 @@ static void msgwin_scroll_to_bottom()
 
 static void log_new_str(int color, char *text)
 {
-	msgwin_msg_add(color, -1, NULL, "%s", text);
+	GTimeVal ct;
+	g_get_current_time(&ct);
+	time_t tm1, tm2;
+	struct tm *t1, *t2;
+	long sec = 0;
+	tm1 = time(NULL);
+	t2 = gmtime(&tm1);
+	tm2 = mktime(t2);
+	t1 = localtime(&tm1);
+	sec = ct.tv_sec + (long)(tm1 -tm2);
+	msgwin_msg_add(color, -1, NULL, "[%02ld:%02ld:%02ld.%03.0f] %s", 
+	(sec/3600)%24, (sec/60)%60, (sec)%60, (double)(ct.tv_usec)/ 1000, text);
 	msgwin_scroll_to_bottom();
 }
 
