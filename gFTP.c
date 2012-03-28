@@ -31,14 +31,31 @@ static GtkTreeStore *file_store;
 static GtkTreeIter parent;
 static CURL *curl;
 static gchar *current_url = NULL;
+static gchar **all_profiles;
+static gsize all_profiles_length;
+static gchar *profiles_file;
 
 GList *filelist;
 GList *dirlist;
 
-struct string {
+struct string
+{
 	char *ptr;
 	int len;
 };
+
+static struct
+{
+	GtkListStore *store;
+	GtkTreeIter iter_store_new;
+	GtkWidget *combo;
+	GtkWidget *host;
+	GtkWidget *port;
+	GtkWidget *login;
+	GtkWidget *passwd;
+	GtkWidget *anon;
+	GtkWidget *showpass;
+} pref;
 
 size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str)
 {
@@ -421,6 +438,79 @@ static GtkWidget *create_popup_menu(void)
 	return menu;
 }
 
+static void load_profiles(gboolean fill_combo_box)
+{
+	GKeyFile *profiles = g_key_file_new();
+	profiles_file = g_strconcat(geany->app->configdir, G_DIR_SEPARATOR_S, "plugins", G_DIR_SEPARATOR_S, "gFTP", G_DIR_SEPARATOR_S, "profiles.conf", NULL);
+	g_key_file_load_from_file(profiles, profiles_file, G_KEY_FILE_NONE, NULL);
+	all_profiles = g_key_file_get_groups(profiles, &all_profiles_length);
+	if (fill_combo_box) {
+		GtkTreeIter iter;
+		gsize i;
+		for (i = 0; i < all_profiles_length; i++) {
+			gtk_list_store_append(GTK_LIST_STORE(pref.store), &iter);
+			gtk_list_store_set(GTK_LIST_STORE(pref.store), &iter, 
+			0, utils_get_setting_string(profiles, all_profiles[i], "host", ""), 
+			1, utils_get_setting_string(profiles, all_profiles[i], "port", "21"), 
+			2, utils_get_setting_string(profiles, all_profiles[i], "login", ""), 
+			3, utils_get_setting_string(profiles, all_profiles[i], "password", ""), 
+			-1);
+			g_free(all_profiles[i]);
+		}
+	}
+	g_key_file_free(profiles);
+}
+
+static void load_settings(void)
+{
+	load_profiles(FALSE);
+}
+
+static void save_profiles(void)
+{
+	GKeyFile *profiles = g_key_file_new();
+	gchar *data;
+	gchar *profiles_dir = g_path_get_dirname(profiles_file);
+	GtkTreeModel *model;
+	model = gtk_combo_box_get_model(GTK_COMBO_BOX(pref.combo));
+	GtkTreeIter iter;
+	gboolean valid;
+	valid = gtk_tree_model_get_iter_from_string(model, &iter, "2");
+	gchar *host = NULL;
+	gchar *port = NULL;
+	gchar *login = NULL;
+	gchar *password = NULL;
+	while (valid) {
+		gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 
+		0, &host, 
+		1, &port, 
+		2, &login, 
+		3, &password, 
+		-1);
+		if (g_strcmp0(host, "")!=0) {
+			host = g_strstrip(host);
+			g_key_file_set_string(profiles, host, "host", host);
+			g_key_file_set_string(profiles, host, "port", g_strstrip(port));
+			g_key_file_set_string(profiles, host, "login", g_strstrip(login));
+			g_key_file_set_string(profiles, host, "password", g_strstrip(password));
+			g_free(host);
+			g_free(port);
+			g_free(login);
+			g_free(password);
+		}
+		valid = gtk_tree_model_iter_next(model, &iter);
+	}
+	if (!g_file_test(profiles_dir, G_FILE_TEST_IS_DIR) && utils_mkdir(profiles_dir, TRUE)!=0) {
+		dialogs_show_msgbox(GTK_MESSAGE_ERROR, "Plugin configuration directory could not be created.");
+	} else {
+		data = g_key_file_to_data(profiles, NULL, NULL);
+		utils_write_file(profiles_file, data);
+		g_free(data);
+	}
+	g_free(profiles_dir);
+	g_key_file_free(profiles);
+}
+
 static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
 {
 	if (event->button == 1 && event->type == GDK_2BUTTON_PRESS) {
@@ -437,6 +527,117 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
 static void on_edit_preferences(void)
 {
 	plugin_show_configure(geany_plugin);
+}
+
+static gboolean is_edit_profiles_selected_nth_item(GtkTreeIter *iter, char *num)
+{
+	return gtk_tree_path_compare(gtk_tree_path_new_from_string(gtk_tree_model_get_string_from_iter(GTK_TREE_MODEL(pref.store), iter)), gtk_tree_path_new_from_string(num))==0;
+}
+
+static void is_select_profiles_use_anonymous(GtkTreeIter *iter)
+{
+	gboolean toggle = FALSE;
+	gchar *login = g_strdup_printf("%s", "");
+	if (gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.store), iter)) {
+		gtk_tree_model_get(GTK_TREE_MODEL(pref.store), iter, 2, &login, -1);
+		if (g_strcmp0(login, "anonymous")==0) {
+			toggle = TRUE;
+		}
+	}
+	g_free(login);
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pref.anon), toggle);
+	gtk_widget_set_sensitive(pref.login, !toggle);
+	gtk_widget_set_sensitive(pref.passwd, !toggle);
+}
+
+static void *on_host_login_password_changed(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
+{
+	if (!gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.store), &pref.iter_store_new) || is_edit_profiles_selected_nth_item(&pref.iter_store_new, "0")) {
+		gtk_list_store_append(GTK_LIST_STORE(pref.store), &pref.iter_store_new);
+	}
+	gtk_list_store_set(GTK_LIST_STORE(pref.store), &pref.iter_store_new, 
+	0, gtk_entry_get_text(GTK_ENTRY(pref.host)), 
+	1, gtk_entry_get_text(GTK_ENTRY(pref.port)), 
+	2, gtk_entry_get_text(GTK_ENTRY(pref.login)), 
+	3, gtk_entry_get_text(GTK_ENTRY(pref.passwd)), 
+	-1);
+	gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &pref.iter_store_new);
+	return FALSE;
+}
+
+static void on_use_anonymous_toggled(GtkToggleButton *togglebutton, gpointer user_data)
+{
+	gboolean toggle = gtk_toggle_button_get_active(togglebutton);
+	gtk_widget_set_sensitive(pref.login, !toggle);
+	gtk_widget_set_sensitive(pref.passwd, !toggle);
+	if (toggle){
+		gtk_entry_set_text(GTK_ENTRY(pref.login), "anonymous");
+		gtk_entry_set_text(GTK_ENTRY(pref.passwd), "ftp@example.com");
+	}
+	on_host_login_password_changed(NULL, NULL, NULL);
+}
+
+static void on_show_password_toggled(GtkToggleButton *togglebutton, gpointer user_data)
+{
+	gtk_entry_set_visibility(GTK_ENTRY(pref.passwd), gtk_toggle_button_get_active(togglebutton));
+}
+
+static void on_edit_profiles_changed(void)
+{
+	GtkTreeIter iter;
+	gtk_combo_box_get_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
+	gtk_combo_box_get_active_iter(GTK_COMBO_BOX(pref.combo), &pref.iter_store_new);
+	gchar *host = g_strdup_printf("%s", "");
+	gchar *port = g_strdup_printf("%s", "21");
+	gchar *login = g_strdup_printf("%s", "");
+	gchar *password = g_strdup_printf("%s", "");
+	if (is_edit_profiles_selected_nth_item(&iter, "0")) {
+		gchar *host_test = g_strdup_printf("%s", "");
+		int n = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pref.store),NULL);
+		gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter, g_strdup_printf("%d",n-1));
+		gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 0, &host_test, -1);
+		if (g_strcmp0(host_test, "")==0) { // prevent creating more blanks
+			g_free(host_test);
+			gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
+			goto end;
+		}
+		gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pref.store), &iter);
+	} else {
+		if (gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.store), &iter)) {
+			gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 
+			0, &host, 
+			1, &port, 
+			2, &login, 
+			3, &password, 
+			-1);
+		}
+	}
+	gtk_entry_set_text(GTK_ENTRY(pref.host), host);
+	gtk_entry_set_text(GTK_ENTRY(pref.port), port);
+	gtk_entry_set_text(GTK_ENTRY(pref.login), login);
+	gtk_entry_set_text(GTK_ENTRY(pref.passwd), password);
+	
+	is_select_profiles_use_anonymous(&iter);
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pref.showpass), FALSE);
+	
+	end:
+	g_free(host);
+	g_free(port);
+	g_free(login);
+	g_free(password);
+}
+
+static gboolean profiles_treeview_row_is_separator(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+{
+	return is_edit_profiles_selected_nth_item(iter, "1");
+}
+
+static void on_configure_response(GtkDialog *dialog, gint response, gpointer user_data)
+{
+	if (response == GTK_RESPONSE_OK || response == GTK_RESPONSE_APPLY)
+	{
+		save_profiles();
+	}
 }
 
 static void prepare_file_view()
@@ -521,6 +722,8 @@ void plugin_init(GeanyData *data)
 	gtk_container_add(GTK_CONTAINER(widget), file_view);
 	gtk_box_pack_start(GTK_BOX(box), widget, TRUE, TRUE, 0);
 	
+	load_settings();
+	
 	gtk_widget_show_all(box);
 	gtk_notebook_append_page(GTK_NOTEBOOK(geany->main_widgets->sidebar_notebook), box, gtk_label_new(_("FTP")));
 	gdk_threads_leave();
@@ -528,27 +731,94 @@ void plugin_init(GeanyData *data)
 
 GtkWidget *plugin_configure(GtkDialog *dialog)
 {
-	GtkWidget *widget, *vbox;
+	GtkWidget *widget, *vbox, *table;
 	
 	vbox = gtk_vbox_new(FALSE, 6);
 	
-	widget = gtk_label_new("Profiles:");
+	widget = gtk_label_new("<b>Profiles</b>");
+	gtk_label_set_use_markup(GTK_LABEL(widget), TRUE);
 	gtk_misc_set_alignment(GTK_MISC(widget), 0, 0.5);
 	gtk_box_pack_start(GTK_BOX(vbox), widget, FALSE, FALSE, 0);
 	
-	widget = gtk_combo_box_new_text();
-	gtk_combo_box_append_text(GTK_COMBO_BOX(widget), "New profile...");
+	GtkListStore *store;
+	store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+	GtkTreeIter iter;
+	gtk_list_store_append(store, &iter);
+	gtk_list_store_set(store, &iter, 0, "New profile...", -1);
+	widget = gtk_combo_box_new_with_model(GTK_TREE_MODEL(store));
+	gtk_list_store_append(store, &iter); //for separator
+	pref.store = store;
+	pref.combo = widget;
+	g_object_unref(G_OBJECT(store));
+	
+	GtkCellRenderer *renderer;
+	renderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(widget), renderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(widget), renderer, "text", 0);
 	gtk_combo_box_set_active(GTK_COMBO_BOX(widget), 0);
 	gtk_widget_set_tooltip_text(widget, "Choose a profile to edit or choose New profile to create one.");
+	gtk_combo_box_set_row_separator_func(GTK_COMBO_BOX(widget), (GtkTreeViewRowSeparatorFunc)profiles_treeview_row_is_separator, NULL, NULL);
+	g_signal_connect(widget, "changed", G_CALLBACK(on_edit_profiles_changed), NULL);
 	gtk_box_pack_start(GTK_BOX(vbox), widget, FALSE, FALSE, 0);
+	
+	load_profiles(TRUE);
+	
+	table = gtk_table_new(3, 4, FALSE);
+	
+	widget = gtk_label_new("Host");
+	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
+	pref.host = widget;
+	
+	widget = gtk_label_new("Port");
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_widget_set_size_request(widget, 40, -1);
+	gtk_entry_set_text(GTK_ENTRY(widget), "21");
+	gtk_table_attach(GTK_TABLE(table), widget, 3, 4, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
+	pref.port = widget;
+	
+	widget = gtk_label_new("Login");
+	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
+	pref.login = widget;
+	widget = gtk_check_button_new_with_label("Anonymous");
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "toggled", G_CALLBACK(on_use_anonymous_toggled), NULL);
+	pref.anon = widget;
+	
+	widget = gtk_label_new("Password");
+	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_entry_set_visibility(GTK_ENTRY(widget), FALSE);
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
+	pref.passwd = widget;
+	widget = gtk_check_button_new_with_label("Show");
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "toggled", G_CALLBACK(on_show_password_toggled), NULL);
+	pref.showpass = widget;
+	
+	gtk_box_pack_start(GTK_BOX(vbox), table, FALSE, FALSE, 0);
 	
 	gtk_widget_show_all(vbox);
 	
+	g_signal_connect(dialog, "response", G_CALLBACK(on_configure_response), NULL);
 	return vbox;
 }
 
 void plugin_cleanup(void)
 {
 	curl_global_cleanup();
+	g_free(profiles_file);
+	g_strfreev(all_profiles);
 	gtk_widget_destroy(box);
 }
