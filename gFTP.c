@@ -49,6 +49,7 @@ static struct
 	GtkListStore *store;
 	GtkTreeIter iter_store_new;
 	GtkWidget *combo;
+	GtkWidget *delete;
 	GtkWidget *host;
 	GtkWidget *port;
 	GtkWidget *login;
@@ -550,18 +551,25 @@ static void is_select_profiles_use_anonymous(GtkTreeIter *iter)
 	gtk_widget_set_sensitive(pref.passwd, !toggle);
 }
 
+static void check_delete_button_sensitive(GtkTreeIter *iter)
+{
+	gtk_widget_set_sensitive(pref.delete, !is_edit_profiles_selected_nth_item(iter, "0"));
+}
+
 static void *on_host_login_password_changed(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
 {
-	if (!gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.store), &pref.iter_store_new) || is_edit_profiles_selected_nth_item(&pref.iter_store_new, "0")) {
-		gtk_list_store_append(GTK_LIST_STORE(pref.store), &pref.iter_store_new);
+	if (widget) {
+		if (!gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.store), &pref.iter_store_new) || is_edit_profiles_selected_nth_item(&pref.iter_store_new, "0")) {
+			gtk_list_store_append(GTK_LIST_STORE(pref.store), &pref.iter_store_new);
+		}
+		gtk_list_store_set(GTK_LIST_STORE(pref.store), &pref.iter_store_new, 
+		0, gtk_entry_get_text(GTK_ENTRY(pref.host)), 
+		1, gtk_entry_get_text(GTK_ENTRY(pref.port)), 
+		2, gtk_entry_get_text(GTK_ENTRY(pref.login)), 
+		3, gtk_entry_get_text(GTK_ENTRY(pref.passwd)), 
+		-1);
+		gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &pref.iter_store_new);
 	}
-	gtk_list_store_set(GTK_LIST_STORE(pref.store), &pref.iter_store_new, 
-	0, gtk_entry_get_text(GTK_ENTRY(pref.host)), 
-	1, gtk_entry_get_text(GTK_ENTRY(pref.port)), 
-	2, gtk_entry_get_text(GTK_ENTRY(pref.login)), 
-	3, gtk_entry_get_text(GTK_ENTRY(pref.passwd)), 
-	-1);
-	gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &pref.iter_store_new);
 	return FALSE;
 }
 
@@ -591,18 +599,7 @@ static void on_edit_profiles_changed(void)
 	gchar *port = g_strdup_printf("%s", "21");
 	gchar *login = g_strdup_printf("%s", "");
 	gchar *password = g_strdup_printf("%s", "");
-	if (is_edit_profiles_selected_nth_item(&iter, "0")) {
-		gchar *host_test = g_strdup_printf("%s", "");
-		int n = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pref.store),NULL);
-		gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter, g_strdup_printf("%d",n-1));
-		gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 0, &host_test, -1);
-		if (g_strcmp0(host_test, "")==0) { // prevent creating more blanks
-			g_free(host_test);
-			gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
-			goto end;
-		}
-		gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pref.store), &iter);
-	} else {
+	if (!is_edit_profiles_selected_nth_item(&iter, "0")) {
 		if (gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.store), &iter)) {
 			gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 
 			0, &host, 
@@ -616,15 +613,26 @@ static void on_edit_profiles_changed(void)
 	gtk_entry_set_text(GTK_ENTRY(pref.port), port);
 	gtk_entry_set_text(GTK_ENTRY(pref.login), login);
 	gtk_entry_set_text(GTK_ENTRY(pref.passwd), password);
-	
-	is_select_profiles_use_anonymous(&iter);
-	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pref.showpass), FALSE);
-	
-	end:
 	g_free(host);
 	g_free(port);
 	g_free(login);
 	g_free(password);
+	
+	is_select_profiles_use_anonymous(&iter);
+	check_delete_button_sensitive(&iter);
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pref.showpass), FALSE);
+}
+
+static void on_delete_profile_clicked()
+{
+	GtkTreeIter iter;
+	gtk_combo_box_get_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
+	if (!is_edit_profiles_selected_nth_item(&iter, "0")) {
+		gtk_list_store_remove(GTK_LIST_STORE(pref.store), &iter);
+		int n = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pref.store),NULL);
+		if (n==2) n=1;
+		gtk_combo_box_set_active(GTK_COMBO_BOX(pref.combo), n-1);
+	}
 }
 
 static gboolean profiles_treeview_row_is_separator(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
@@ -655,10 +663,6 @@ static void prepare_file_view()
 	text_renderer = gtk_cell_renderer_text_new();
 	gtk_tree_view_column_pack_start(column, text_renderer, TRUE);
 	gtk_tree_view_column_set_attributes(column, text_renderer, "text", FILEVIEW_COLUMN_NAME, NULL);
-	//text_renderer = gtk_cell_renderer_text_new();
-	//g_object_set(text_renderer, "xalign", 1.0, NULL);
-	//gtk_tree_view_column_pack_start(column, text_renderer, FALSE);
-	//gtk_tree_view_column_set_attributes(column, text_renderer, "text", FILEVIEW_COLUMN_SIZE, NULL);
 	gtk_tree_view_append_column(GTK_TREE_VIEW(file_view), column);
 	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(file_view), FALSE);
 	
@@ -759,51 +763,57 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_widget_set_tooltip_text(widget, "Choose a profile to edit or choose New profile to create one.");
 	gtk_combo_box_set_row_separator_func(GTK_COMBO_BOX(widget), (GtkTreeViewRowSeparatorFunc)profiles_treeview_row_is_separator, NULL, NULL);
 	g_signal_connect(widget, "changed", G_CALLBACK(on_edit_profiles_changed), NULL);
-	gtk_box_pack_start(GTK_BOX(vbox), widget, FALSE, FALSE, 0);
 	
 	load_profiles(TRUE);
 	
-	table = gtk_table_new(3, 4, FALSE);
+	table = gtk_table_new(4, 4, FALSE);
+	
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_button_new_from_stock(GTK_STOCK_DELETE);
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_delete_profile_clicked), NULL);
+	pref.delete = widget;
+	check_delete_button_sensitive(NULL);
 	
 	widget = gtk_label_new("Host");
-	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
-	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
-	widget = gtk_entry_new();
-	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
-	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
-	pref.host = widget;
-	
-	widget = gtk_label_new("Port");
-	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
-	widget = gtk_entry_new();
-	gtk_widget_set_size_request(widget, 40, -1);
-	gtk_entry_set_text(GTK_ENTRY(widget), "21");
-	gtk_table_attach(GTK_TABLE(table), widget, 3, 4, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
-	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
-	pref.port = widget;
-	
-	widget = gtk_label_new("Login");
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
+	pref.host = widget;
+	
+	widget = gtk_label_new("Port");
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_widget_set_size_request(widget, 40, -1);
+	gtk_entry_set_text(GTK_ENTRY(widget), "21");
+	gtk_table_attach(GTK_TABLE(table), widget, 3, 4, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
+	pref.port = widget;
+	
+	widget = gtk_label_new("Login");
+	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
 	pref.login = widget;
 	widget = gtk_check_button_new_with_label("Anonymous");
-	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "toggled", G_CALLBACK(on_use_anonymous_toggled), NULL);
 	pref.anon = widget;
 	
 	widget = gtk_label_new("Password");
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
-	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
 	gtk_entry_set_visibility(GTK_ENTRY(widget), FALSE);
-	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
 	pref.passwd = widget;
 	widget = gtk_check_button_new_with_label("Show");
-	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "toggled", G_CALLBACK(on_show_password_toggled), NULL);
 	pref.showpass = widget;
 	
