@@ -569,8 +569,9 @@ static void *to_send_commands(gpointer p)
 	return NULL;
 }
 
-static void on_create_folder_clicked(GtkMenuItem *menuitem, gpointer user_data)
+static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 {
+	gint type = (int)user_data;
 	GtkTreeSelection *treesel;
 	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
 	GList *list;
@@ -582,22 +583,41 @@ static void on_create_folder_clicked(GtkMenuItem *menuitem, gpointer user_data)
 		GtkTreeIter iter;
 		gtk_tree_model_get_iter(model, &iter, treepath);
 		gchar *name;
-		if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
-			if (is_folder_selected(list)) {
-				gtk_tree_model_get_iter(model, &parent, treepath);
-				gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_DIR, &name, -1);
-			} else {
-				gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
-			}
-		} else {
-			gtk_tree_model_get_iter(model, &parent, treepath);
-			name="";
-		}
+		
 		last_command = NULL;
-		last_command = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Name", "New Folder");
-		if (last_command) {
-			last_command = g_strdup_printf("MKD %s", last_command);
-			to_send_commands(name);
+		
+		switch (type) {
+			case 1:
+				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
+					if (is_folder_selected(list)) {
+						gtk_tree_model_get_iter(model, &parent, treepath);
+						gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+					} else {
+						gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
+					}
+				} else {
+					gtk_tree_model_get_iter(model, &parent, treepath);
+					name="";
+				}
+				last_command = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Name", "New Folder");
+				if (last_command) {
+					last_command = g_strdup_printf("MKD %s", last_command);
+					to_send_commands(name);
+				}
+				break;
+			case 2:
+				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
+					if (is_folder_selected(list)) {
+						gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
+						//gtk_tree_model_get_iter(model, &parent, treepath);
+						gchar *dirname;
+						gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
+						last_command = g_strdup_printf("RMD %s", dirname);
+						g_free(dirname);
+						to_send_commands(name);
+					}
+				}
+				break;			
 		}
 	}
 	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
@@ -712,7 +732,13 @@ static GtkWidget *create_popup_menu(void)
 	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "Create _Folder");
 	gtk_widget_show(item);
 	gtk_container_add(GTK_CONTAINER(menu), item);
-	g_signal_connect(item, "activate", G_CALLBACK(on_create_folder_clicked), NULL);
+	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)1);
+	
+	item = gtk_image_menu_item_new_from_stock(GTK_STOCK_DELETE, NULL);
+	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "Delete Empty _Folder");
+	gtk_widget_show(item);
+	gtk_container_add(GTK_CONTAINER(menu), item);
+	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)2);
 	
 	return menu;
 }
@@ -940,6 +966,13 @@ static void on_delete_profile_clicked()
 	}
 }
 
+static void on_document_save()
+{
+	if (curl) {
+		dialogs_show_msgbox(0, "Ready To Upload");
+	}
+}
+
 static gboolean profiles_treeview_row_is_separator(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
 {
 	return is_edit_profiles_selected_nth_item(iter, "1");
@@ -1033,6 +1066,8 @@ void plugin_init(GeanyData *data)
 	gtk_widget_show_all(box);
 	gtk_notebook_append_page(GTK_NOTEBOOK(geany->main_widgets->sidebar_notebook), box, gtk_label_new(_("FTP")));
 	gdk_threads_leave();
+	
+	plugin_signal_connect(geany_plugin, NULL, "document-save", TRUE, G_CALLBACK(on_document_save), NULL);
 }
 
 GtkWidget *plugin_configure(GtkDialog *dialog)
