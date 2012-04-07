@@ -1,5 +1,6 @@
 #include <geanyplugin.h>
 #include <curl/curl.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -34,6 +35,7 @@ static gsize all_profiles_length;
 static gchar *profiles_file, *tmp_dir;
 static gchar *last_command;
 static gboolean retried = FALSE;
+static gboolean uploading = FALSE;
 
 GList *filelist;
 GList *dirlist;
@@ -42,6 +44,18 @@ struct string
 {
 	char *ptr;
 	int len;
+};
+
+struct upload_location
+{
+	char *from;
+	char *to;
+};
+
+struct uploadf {
+	FILE *fp;
+	int transfered;
+	struct stat st;
 };
 
 static struct
@@ -466,7 +480,67 @@ static void *download_file(gpointer p)
 				open_external(filedir);
 	gtk_widget_set_sensitive(box, TRUE);
 	gtk_widget_hide(geany->main_widgets->progressbar);
+	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
 	gdk_threads_leave();
+	g_thread_exit(NULL);
+	return NULL;
+}
+
+static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *p)
+{
+	gdk_threads_enter();
+	struct uploadf *file = (struct uploadf *)p;
+	size_t retcode = fread(ptr, size, nmemb, file->fp);
+	file->transfered+=retcode;
+	double done=0.0;
+	done=(double)file->transfered/file->st.st_size;
+	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), done);
+	gchar *doneper = g_strdup_printf("%.2f%%", done*100);
+	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
+	g_free(doneper);
+	gdk_threads_leave();
+	return retcode;
+}
+
+static void *upload_file(gpointer p)
+{
+	struct upload_location *ul = (struct upload_location *)p;
+	gdk_threads_enter();
+	gtk_widget_set_sensitive(box, FALSE);
+	gdk_threads_leave();
+	struct uploadf file;
+	char *ulto = ul->to;
+	if (stat(ul->from, &file.st)==0) {
+		char *url = ulto;
+		if (curl) {
+			file.transfered=0;
+			file.fp=fopen(ul->from,"rb");
+			url = g_strconcat(current_profile.url, url, NULL);
+			gint64 port = g_ascii_strtoll(current_profile.port, NULL, 0);
+			if (port<=0 || port>65535) port=21;
+			curl_easy_setopt(curl, CURLOPT_URL, url);
+			curl_easy_setopt(curl, CURLOPT_PORT, port);
+			curl_easy_setopt(curl, CURLOPT_USERNAME, current_profile.login);
+			curl_easy_setopt(curl, CURLOPT_PASSWORD, current_profile.password);
+			curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+			curl_easy_setopt(curl, CURLOPT_READFUNCTION, read_callback);
+			curl_easy_setopt(curl, CURLOPT_READDATA, &file);
+			curl_easy_setopt(curl, CURLOPT_FTP_CREATE_MISSING_DIRS, 1L);
+			curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
+			curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
+			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+			curl_easy_perform(curl);
+			fclose(file.fp);
+			uploading = FALSE;
+		}
+	}
+	gdk_threads_enter();
+	gtk_widget_set_sensitive(box, TRUE);
+	gtk_widget_hide(geany->main_widgets->progressbar);
+	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
+	gdk_threads_leave();
+	gchar *name = g_strconcat(g_path_get_dirname(ulto), "/", NULL);
+	to_get_dir_listing(name);
 	g_thread_exit(NULL);
 	return NULL;
 }
@@ -553,6 +627,14 @@ static void *to_download_file(gpointer p)
 	return NULL;
 }
 
+static void *to_upload_file(gpointer p)
+{
+	curl_easy_reset(curl);
+	gtk_widget_show(geany->main_widgets->progressbar);
+	g_thread_create(&upload_file, (gpointer)p, FALSE, NULL);
+	return NULL;
+}
+
 static void *to_get_dir_listing(gpointer p)
 {
 	curl_easy_reset(curl);
@@ -617,7 +699,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 						to_send_commands(name);
 					}
 				}
-				break;			
+				break;
 		}
 	}
 	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
@@ -969,7 +1051,17 @@ static void on_delete_profile_clicked()
 static void on_document_save()
 {
 	if (curl) {
-		dialogs_show_msgbox(0, "Ready To Upload");
+		if (uploading) {
+			dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Please wait until last file upload is complete.");
+		} else {
+			uploading = TRUE;
+			struct upload_location ul;
+			ul.from = document_get_current()->real_path;
+			ul.to = g_path_get_basename(ul.from);
+			char *tmpdir = g_strconcat(tmp_dir, current_profile.login, "@", current_profile.host, "/", NULL);
+			ul.to = g_file_get_relative_path(g_file_new_for_path(tmpdir), g_file_new_for_path(ul.from));
+			to_upload_file(&ul);
+		}
 	}
 }
 
