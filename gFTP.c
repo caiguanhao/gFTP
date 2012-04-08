@@ -30,9 +30,9 @@ static GtkWidget *btn_connect;
 static GtkTreeStore *file_store;
 static GtkTreeIter parent;
 static CURL *curl;
-static gchar **all_profiles;
+static gchar **all_profiles, **all_hosts;
 static gsize all_profiles_length;
-static gchar *profiles_file, *tmp_dir;
+static gchar *profiles_file, *hosts_file, *tmp_dir;
 static gchar *last_command;
 static gboolean retried = FALSE;
 static gboolean uploading = FALSE;
@@ -106,6 +106,7 @@ size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream)
 }
 
 static void save_profiles(gint type);
+static void save_hosts();
 static void *disconnect(gpointer p);
 static void *to_get_dir_listing(gpointer p);
 static void on_retry_use_anonymous_toggled(GtkToggleButton *togglebutton, gpointer user_data)
@@ -275,12 +276,45 @@ static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, vo
 		case CURLINFO_SSL_DATA_IN:
 			break;
 	}
+	if (g_regex_match_simple("^Connected\\sto\\s(.+?)\\s\\((.+?)\\)", firstline, 0, 0)) {
+		GRegex *regex;
+		GMatchInfo *match_info;
+		regex = g_regex_new("^Connected\\sto\\s(.+?)\\s\\((.+?)\\)", G_REGEX_CASELESS, 0, NULL);
+		g_regex_match(regex, firstline, 0, &match_info);
+		gchar *thost = g_match_info_fetch(match_info, 1);
+		gchar *tipaddr = g_match_info_fetch(match_info, 2);
+		if (!g_hostname_is_ip_address(thost)) {
+			gchar *xhosts = g_strjoinv("\n", all_hosts);
+			xhosts = g_strjoin("\n", xhosts, g_strdup_printf("%s %s", thost, tipaddr), NULL);
+			all_hosts = g_strsplit(xhosts, "\n", 0);
+			save_hosts();
+			log_new_str(COLOR_BLUE, "New host saved.");
+			g_free(xhosts);
+		}
+		g_free(thost);
+		g_free(tipaddr);
+		g_match_info_free(match_info);
+		g_regex_unref(regex);
+	}
 	gdk_threads_leave();
 	if (g_regex_match_simple("^530", firstline, 0, 0)) {
 		curl_easy_reset(curl);
 		try_another_username_password();
 	}
 	return 0;
+}
+
+static gchar *find_host (gchar *src)
+{
+	gchar** hostsparts;
+	gint i;
+	for (i = 0; i < g_strv_length(all_hosts); i++) {
+		hostsparts = g_strsplit(all_hosts[i], " ", 0);
+		if (g_strcmp0(hostsparts[0], src)==0)
+			src = g_strdup(hostsparts[1]);
+		g_strfreev(hostsparts);
+	}
+	return src;
 }
 
 static gboolean is_single_selection(GtkTreeSelection *treesel)
@@ -331,6 +365,7 @@ static int add_item(gpointer data, gboolean is_dir)
 			}
 			g_strfreev(nameparts);
 		}
+		g_regex_unref(regex);
 		if (strcmp(parts[1],"0")==0) {
 			sprintf(parts[1], "%s", "");
 		}
@@ -751,7 +786,7 @@ static void to_connect(GtkMenuItem *menuitem, int p)
 {
 	current_profile.index = p;
 	load_profiles(2);
-	current_profile.url=g_strdup_printf("%s", current_profile.host);
+	current_profile.url=g_strdup_printf("%s", find_host(current_profile.host));
 	current_profile.url=g_strstrip(current_profile.url);
 	if (!g_regex_match_simple("^ftp://", current_profile.url, G_REGEX_CASELESS, 0)) {
 		current_profile.url=g_strconcat("ftp://", current_profile.url, NULL);
@@ -917,9 +952,23 @@ static void load_profiles(gint type)
 	g_key_file_free(profiles);
 }
 
+static void load_hosts()
+{
+	GKeyFile *hosts = g_key_file_new();
+	hosts_file = g_strconcat(geany->app->configdir, G_DIR_SEPARATOR_S, "plugins", G_DIR_SEPARATOR_S, "gFTP", G_DIR_SEPARATOR_S, "hosts.conf", NULL);
+	g_key_file_load_from_file(hosts, hosts_file, G_KEY_FILE_NONE, NULL);
+	gsize i;
+	all_hosts = g_key_file_get_groups(hosts, &i);
+	for (i = 0; i < g_strv_length(all_hosts); i++) {
+		all_hosts[i] = g_strconcat(all_hosts[i], " ", utils_get_setting_string(hosts, all_hosts[i], "ip_address", ""), NULL);
+	}
+	g_key_file_free(hosts);
+}
+
 static void load_settings(void)
 {
 	load_profiles(0);
+	load_hosts();
 	tmp_dir = g_strdup_printf("%s/gFTP/",(char *)g_get_tmp_dir());
 }
 
@@ -975,7 +1024,7 @@ static void save_profiles(gint type)
 			break;
 		}
 	}
-	if (!g_file_test(profiles_dir, G_FILE_TEST_IS_DIR) && utils_mkdir(profiles_dir, TRUE)!=0) {
+	if (!g_file_test(profiles_dir, G_FILE_TEST_IS_DIR) || utils_mkdir(profiles_dir, TRUE)!=0) {
 		dialogs_show_msgbox(GTK_MESSAGE_ERROR, "Plugin configuration directory could not be created.");
 	} else {
 		all_profiles = g_key_file_get_groups(profiles, &all_profiles_length);
@@ -985,6 +1034,27 @@ static void save_profiles(gint type)
 	}
 	g_free(profiles_dir);
 	g_key_file_free(profiles);
+}
+
+static void save_hosts()
+{
+	GKeyFile *hosts = g_key_file_new();
+	gchar *data;
+	gchar *hosts_dir = g_path_get_dirname(hosts_file);
+	gsize i;
+	gchar** hostsparts;
+	for (i = 0; i < g_strv_length(all_hosts); i++) {
+		hostsparts = g_strsplit(all_hosts[i], " ", 0);
+		g_key_file_set_string(hosts, hostsparts[0], "ip_address", hostsparts[1]);
+		g_strfreev(hostsparts);
+	}
+	if (g_file_test(hosts_dir, G_FILE_TEST_IS_DIR) && utils_mkdir(hosts_dir, TRUE)==0) {
+		data = g_key_file_to_data(hosts, NULL, NULL);
+		utils_write_file(hosts_file, data);
+		g_free(data);
+	}
+	g_free(hosts_dir);
+	g_key_file_free(hosts);
 }
 
 static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
