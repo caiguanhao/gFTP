@@ -37,6 +37,8 @@ static gchar *last_command;
 static gboolean retried = FALSE;
 static gboolean uploading = FALSE;
 
+#define BASE64ENCODE_TIMES 8
+
 GList *filelist;
 GList *dirlist;
 
@@ -825,6 +827,63 @@ static GtkWidget *create_popup_menu(void)
 	return menu;
 }
 
+static gchar *decrypt(gchar *src)
+{
+	gchar *p1 = NULL;
+	gchar *p2 = NULL;
+	gchar *p3 = NULL;
+	glong t, l1, l2;
+	gsize len;
+	l1 = g_utf8_strlen(src, -1);
+	l2 = 64L;
+	if (l1<=l2) return "";
+	p1 = "";
+	p2 = "";
+	for (t=0; t<(l1>l2*2?l2:l1-l2); t++) {
+		p1 = g_strconcat(p1, g_strndup(src + t * 2, 1), NULL);
+		p2 = g_strconcat(p2, g_strndup(src + t * 2 + 1, 1), NULL);
+	}
+	if (l1>l2*2) {
+		p1 = g_strconcat(p1, g_strndup(src + l2 * 2, l1), NULL);
+	} else {
+		p2 = g_strconcat(p2, g_strndup(src + (l1 - l2) * 2, l1), NULL);
+	}
+	p3 = g_compute_checksum_for_string(G_CHECKSUM_SHA256, p1, g_utf8_strlen(p1, -1));
+	for (t=0; t<BASE64ENCODE_TIMES; t++)
+		p1 = (gchar *)g_base64_decode(p1, &len);
+	if (g_strcmp0(p2, p3)!=0) {
+		p1 = g_strconcat("", NULL);
+	}
+	src = g_strdup(p1);
+	g_free(p1);
+	g_free(p2);
+	g_free(p3);
+	return src;
+}
+
+static gchar *encrypt(gchar *src)
+{
+	gchar *p1 = src;
+	gchar *p2 = NULL;
+	glong t, l1, l2;
+	for (t=0; t<BASE64ENCODE_TIMES; t++)
+	p1 = g_base64_encode((guchar *)p1, g_utf8_strlen(p1, -1));
+	l1 = g_utf8_strlen(p1, -1);
+	p2 = g_compute_checksum_for_string(G_CHECKSUM_SHA256, p1, g_utf8_strlen(p1, -1));
+	l2 = g_utf8_strlen(p2, -1);
+	src = "";
+	for (t=0; t<(l2>l1?l1:l2); t++)
+	src = g_strconcat(src, g_strndup(p1 + t, 1), g_strndup(p2 + t, 1), NULL);
+	if (l2>l1) {
+		src = g_strconcat(src, g_strndup(p2 + l1, l2), NULL);
+	} else {
+		src = g_strconcat(src, g_strndup(p1 + l2, l1), NULL);
+	}
+	g_free(p1);
+	g_free(p2);
+	return src;
+}
+
 static void load_profiles(gint type)
 {
 	GKeyFile *profiles = g_key_file_new();
@@ -841,7 +900,7 @@ static void load_profiles(gint type)
 				0, utils_get_setting_string(profiles, all_profiles[i], "host", ""), 
 				1, utils_get_setting_string(profiles, all_profiles[i], "port", "21"), 
 				2, utils_get_setting_string(profiles, all_profiles[i], "login", ""), 
-				3, utils_get_setting_string(profiles, all_profiles[i], "password", ""), 
+				3, decrypt(utils_get_setting_string(profiles, all_profiles[i], "password", "")), 
 				-1);
 			}
 			break;
@@ -852,7 +911,7 @@ static void load_profiles(gint type)
 			current_profile.host = utils_get_setting_string(profiles, all_profiles[i], "host", "");
 			current_profile.port = utils_get_setting_string(profiles, all_profiles[i], "port", "");
 			current_profile.login = utils_get_setting_string(profiles, all_profiles[i], "login", "");
-			current_profile.password = utils_get_setting_string(profiles, all_profiles[i], "password", "");
+			current_profile.password = decrypt(utils_get_setting_string(profiles, all_profiles[i], "password", ""));
 		}
 	}
 	g_key_file_free(profiles);
@@ -887,17 +946,20 @@ static void save_profiles(gint type)
 				2, &login, 
 				3, &password, 
 				-1);
+				host = g_strstrip(host);
 				if (g_strcmp0(host, "")!=0) {
-					host = g_strstrip(host);
+					port = g_strstrip(port);
+					login = g_strstrip(login);
+					password = encrypt(g_strstrip(password));
 					g_key_file_set_string(profiles, host, "host", host);
-					g_key_file_set_string(profiles, host, "port", g_strstrip(port));
-					g_key_file_set_string(profiles, host, "login", g_strstrip(login));
-					g_key_file_set_string(profiles, host, "password", g_strstrip(password));
-					g_free(host);
-					g_free(port);
-					g_free(login);
-					g_free(password);
+					g_key_file_set_string(profiles, host, "port", port);
+					g_key_file_set_string(profiles, host, "login", login);
+					g_key_file_set_string(profiles, host, "password", password);
 				}
+				g_free(host);
+				g_free(port);
+				g_free(login);
+				g_free(password);
 				valid = gtk_tree_model_iter_next(model, &iter);
 			}
 			break;
@@ -909,7 +971,7 @@ static void save_profiles(gint type)
 			g_key_file_set_string(profiles, all_profiles[i], "host", current_profile.host);
 			g_key_file_set_string(profiles, all_profiles[i], "port", current_profile.port);
 			g_key_file_set_string(profiles, all_profiles[i], "login", current_profile.login);
-			g_key_file_set_string(profiles, all_profiles[i], "password", current_profile.password);
+			g_key_file_set_string(profiles, all_profiles[i], "password", encrypt(current_profile.password));
 			break;
 		}
 	}
