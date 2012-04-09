@@ -447,6 +447,46 @@ static int file_cmp(gconstpointer a, gconstpointer b)
 	return g_ascii_strncasecmp(a, b, -1);
 }
 
+static gboolean redefine_parent_iter(gchar *src)
+{
+	GtkTreeIter parent_iter;
+	GtkTreeIter iter;
+	gboolean valid;
+	gchar *name;
+	gchar *icon;
+	gchar **srcs;
+	gint i=0;
+	srcs = g_strsplit(src, "/", 0);
+	if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(file_store), &parent_iter)) {
+		p1:
+		if (g_strcmp0("", srcs[i])==0) {
+			parent = parent_iter;
+			return TRUE;
+		} else {
+			if (gtk_tree_model_iter_children(GTK_TREE_MODEL(file_store), &iter, &parent_iter)) {
+				p2:
+				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_NAME, &name, FILEVIEW_COLUMN_ICON, &icon, -1);
+				if (utils_str_equal(icon, GTK_STOCK_DIRECTORY) && g_strcmp0(name, srcs[i])==0) {
+					if (i<g_strv_length(srcs)-1) {
+						i++;
+						parent_iter = iter;
+						goto p1;
+					} else {
+						parent = iter;
+						return TRUE;
+					}
+				} else {
+					valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(file_store), &iter);
+					if (valid) goto p2; else {
+						parent = parent_iter;
+						return TRUE;
+					}
+				}
+			}
+		}
+	}
+	return FALSE;
+}
 
 static void clear_children()
 {
@@ -1293,6 +1333,7 @@ static void on_document_save()
 		tmpdir = g_strconcat(tmp_dir, current_profile.login, "@", current_profile.host, "/", NULL);
 		dst = g_file_get_relative_path(g_file_new_for_path(tmpdir), g_file_new_for_path(filepath));
 		add_pending_item(0, dst, filepath);
+		if (redefine_parent_iter(dst)) add_pending_item(2, dst, NULL);
 		g_free(tmpdir);
 	}
 }
@@ -1314,7 +1355,7 @@ static void on_window_drag_data_received(GtkWidget *widget, GdkDragContext *drag
 {
 	gboolean success = FALSE;
 
-	if (data->length > 0 && data->format == 8) {
+	if (curl && data->length > 0 && data->format == 8) {
 		gchar *filenames = g_strndup((gchar *) data->data, data->length);
 		gchar *filename;
 		filename = strtok(filenames, "\r\n");
@@ -1335,6 +1376,7 @@ static void on_window_drag_data_received(GtkWidget *widget, GdkDragContext *drag
 		if (g_strcmp0(name, "./")==0 || g_strcmp0(name, "/")==0) name = "";
 		gchar *dst;
 		gchar *filepath;
+		redefine_parent_iter(name);
 		while (filename!=NULL) {
 			filepath = g_filename_from_uri(filename, NULL, NULL);
 			dst = g_strconcat(name, g_path_get_basename(filepath), NULL);
