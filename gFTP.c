@@ -24,7 +24,7 @@ enum
 	FILEVIEW_N_COLUMNS
 };
 
-static GtkWidget *box;
+static GtkWidget *box, *fileview_scroll;
 static GtkWidget *file_view, *pending_view;
 static GtkWidget *btn_connect;
 static GtkTreeStore *file_store;
@@ -77,6 +77,7 @@ static struct
 	GtkWidget *passwd;
 	GtkWidget *anon;
 	GtkWidget *showpass;
+	GtkWidget *remote;
 } pref;
 
 static struct
@@ -93,6 +94,7 @@ static struct
 	char *port;
 	char *login;
 	char *password;
+	char *remote;
 } current_profile;
 
 size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str)
@@ -256,6 +258,13 @@ static void log_new_str(int color, char *text)
 	msgwin_scroll_to_bottom();
 }
 
+static void fileview_scroll_to_iter(GtkTreeIter *iter)
+{
+	GtkTreePath *path;
+	path = gtk_tree_model_get_path(GTK_TREE_MODEL(file_store), iter);
+	gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(file_view), path, NULL, TRUE, 0.0, 0.0);
+}
+
 static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, void *userp)
 {
 	char * odata;
@@ -381,7 +390,7 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 			gtk_list_store_append(pending_store, &iter);
 			gtk_list_store_set(pending_store, &iter,
 			0, GTK_STOCK_REFRESH, 
-			1, "0%", 2, 0, 3, n1, 4, "",
+			1, "0%", 2, 0, 3, n1, 4, n2?n2:"",
 			-1);
 			break;
 		case 3: //commands
@@ -447,7 +456,7 @@ static int file_cmp(gconstpointer a, gconstpointer b)
 	return g_ascii_strncasecmp(a, b, -1);
 }
 
-static gboolean redefine_parent_iter(gchar *src)
+static gboolean redefine_parent_iter(gchar *src, gboolean strict_mode)
 {
 	GtkTreeIter parent_iter;
 	GtkTreeIter iter;
@@ -461,7 +470,7 @@ static gboolean redefine_parent_iter(gchar *src)
 		p1:
 		if (g_strcmp0("", srcs[i])==0) {
 			parent = parent_iter;
-			return TRUE;
+			goto true;
 		} else {
 			if (gtk_tree_model_iter_children(GTK_TREE_MODEL(file_store), &iter, &parent_iter)) {
 				p2:
@@ -473,19 +482,27 @@ static gboolean redefine_parent_iter(gchar *src)
 						goto p1;
 					} else {
 						parent = iter;
-						return TRUE;
+						goto true;
 					}
 				} else {
 					valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(file_store), &iter);
-					if (valid) goto p2; else {
+					if (valid) goto p2; else if(!strict_mode) {
 						parent = parent_iter;
-						return TRUE;
+						goto true;
 					}
 				}
 			}
 		}
 	}
+	g_free(name);
+	g_free(icon);
+	g_strfreev(srcs);
 	return FALSE;
+	true:
+	g_free(name);
+	g_free(icon);
+	g_strfreev(srcs);
+	return TRUE;
 }
 
 static void clear_children()
@@ -671,8 +688,18 @@ static void *upload_file(gpointer p)
 
 static void *get_dir_listing(gpointer p)
 {
+	struct transfer *ls = (struct transfer *)p;
+	gchar *lsfrom = g_strdup(ls->from);
+	gchar *lsto = g_strdup(ls->to);
+	gboolean auto_scroll = FALSE;
+	if (g_strcmp0(lsto, "")!=0) {
+		if (!redefine_parent_iter(lsto, TRUE))
+			goto end;
+		else
+			auto_scroll = TRUE;
+	}
 	clear_children();
-	const char *url = g_strconcat(current_profile.url, (const char *)p, NULL);
+	const char *url = g_strconcat(current_profile.url, lsfrom, NULL);
 	struct string str;
 	str.len = 0;
 	str.ptr = malloc(1);
@@ -694,10 +721,14 @@ static void *get_dir_listing(gpointer p)
 	if (to_list(str.ptr)==0) {
 		gdk_threads_enter();
 		gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_DISCONNECT);
+		if (auto_scroll) fileview_scroll_to_iter(&parent);
 		gdk_threads_leave();
 	}
 	free(str.ptr);
+	end:
 	gdk_threads_enter();
+	g_free(lsfrom);
+	g_free(lsto);
 	ui_progress_bar_stop();
 	execute_end(2);
 	gdk_threads_leave();
@@ -785,7 +816,11 @@ static void execute()
 			to_upload_file(&ul);
 			log_new_str(COLOR_BLUE, "Upload request has been added to the pending list.");
 		} else if (utils_str_equal(icon, GTK_STOCK_REFRESH)) {
-			to_get_dir_listing(g_strconcat(g_path_get_dirname(remote), "/", NULL));
+			struct transfer ls;
+			ls.from = g_strconcat(g_path_get_dirname(remote), "/", NULL);
+			ls.to = g_strdup(local);
+			to_get_dir_listing(&ls);
+			log_new_str(COLOR_BLUE, "Get directory listing request has been added to the pending list.");
 		} else if (utils_str_equal(icon, GTK_STOCK_GO_DOWN)) {
 			struct transfer dl;
 			dl.from = g_strdup(remote);
@@ -880,7 +915,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 	g_list_free(list);
 }
 
-static void on_open_clicked(GtkMenuItem *menuitem, gpointer user_data)
+static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
 {
 	GtkTreeSelection *treesel;
 	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
@@ -897,6 +932,18 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer user_data)
 		if (is_folder_selected(list)) {
 			gtk_tree_model_get_iter(model, &parent, treepath);
 			add_pending_item(2, name, NULL);
+			if (p) {
+				gchar *remote = (gchar *)p;
+				gchar **remoteparts = g_strsplit(remote, "/", 0);
+				gint i;
+				remote = g_strdup("");
+				for (i=0; i<g_strv_length(remoteparts); i++) {
+					if (g_strcmp0(remoteparts[i], "")!=0) {
+						remote = g_strconcat(remote, remoteparts[i], "/", NULL);
+						add_pending_item(2, remote, remote);
+					}
+				}
+			}
 		} else {
 			gchar *filepath;
 			filepath = g_strconcat(tmp_dir, current_profile.login, "@", current_profile.host, NULL);
@@ -958,7 +1005,7 @@ static void to_connect(GtkMenuItem *menuitem, int p)
 	
 	curl = curl_easy_init();
 	
-	on_open_clicked(NULL, NULL);
+	on_open_clicked(NULL, current_profile.remote);
 }
 
 static void on_connect_clicked(gpointer p)
@@ -1079,6 +1126,7 @@ static void load_profiles(gint type)
 				1, utils_get_setting_string(profiles, all_profiles[i], "port", "21"), 
 				2, utils_get_setting_string(profiles, all_profiles[i], "login", ""), 
 				3, decrypt(utils_get_setting_string(profiles, all_profiles[i], "password", "")), 
+				4, utils_get_setting_string(profiles, all_profiles[i], "remote", ""), 
 				-1);
 			}
 			break;
@@ -1090,6 +1138,7 @@ static void load_profiles(gint type)
 			current_profile.port = utils_get_setting_string(profiles, all_profiles[i], "port", "");
 			current_profile.login = utils_get_setting_string(profiles, all_profiles[i], "login", "");
 			current_profile.password = decrypt(utils_get_setting_string(profiles, all_profiles[i], "password", ""));
+			current_profile.remote = utils_get_setting_string(profiles, all_profiles[i], "remote", "");
 		}
 	}
 	g_key_file_free(profiles);
@@ -1131,12 +1180,14 @@ static void save_profiles(gint type)
 			gchar *port = NULL;
 			gchar *login = NULL;
 			gchar *password = NULL;
+			gchar *remote = NULL;
 			while (valid) {
 				gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 
 				0, &host, 
 				1, &port, 
 				2, &login, 
 				3, &password, 
+				4, &remote, 
 				-1);
 				host = g_strstrip(host);
 				if (g_strcmp0(host, "")!=0) {
@@ -1147,11 +1198,13 @@ static void save_profiles(gint type)
 					g_key_file_set_string(profiles, host, "port", port);
 					g_key_file_set_string(profiles, host, "login", login);
 					g_key_file_set_string(profiles, host, "password", password);
+					g_key_file_set_string(profiles, host, "remote", remote);
 				}
 				g_free(host);
 				g_free(port);
 				g_free(login);
 				g_free(password);
+				g_free(remote);
 				valid = gtk_tree_model_iter_next(model, &iter);
 			}
 			break;
@@ -1164,6 +1217,7 @@ static void save_profiles(gint type)
 			g_key_file_set_string(profiles, all_profiles[i], "port", current_profile.port);
 			g_key_file_set_string(profiles, all_profiles[i], "login", current_profile.login);
 			g_key_file_set_string(profiles, all_profiles[i], "password", encrypt(current_profile.password));
+			g_key_file_set_string(profiles, all_profiles[i], "remote", current_profile.remote);
 			break;
 		}
 	}
@@ -1255,6 +1309,7 @@ static void *on_host_login_password_changed(GtkWidget *widget, GdkEventKey *even
 		1, gtk_entry_get_text(GTK_ENTRY(pref.port)), 
 		2, gtk_entry_get_text(GTK_ENTRY(pref.login)), 
 		3, gtk_entry_get_text(GTK_ENTRY(pref.passwd)), 
+		4, gtk_entry_get_text(GTK_ENTRY(pref.remote)), 
 		-1);
 		gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &pref.iter_store_new);
 	}
@@ -1287,6 +1342,7 @@ static void on_edit_profiles_changed(void)
 	gchar *port = g_strdup_printf("%s", "21");
 	gchar *login = g_strdup_printf("%s", "");
 	gchar *password = g_strdup_printf("%s", "");
+	gchar *remote = g_strdup_printf("%s", "");
 	if (!is_edit_profiles_selected_nth_item(&iter, "0")) {
 		if (gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.store), &iter)) {
 			gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 
@@ -1294,6 +1350,7 @@ static void on_edit_profiles_changed(void)
 			1, &port, 
 			2, &login, 
 			3, &password, 
+			4, &remote, 
 			-1);
 		}
 	}
@@ -1301,10 +1358,12 @@ static void on_edit_profiles_changed(void)
 	gtk_entry_set_text(GTK_ENTRY(pref.port), port);
 	gtk_entry_set_text(GTK_ENTRY(pref.login), login);
 	gtk_entry_set_text(GTK_ENTRY(pref.passwd), password);
+	gtk_entry_set_text(GTK_ENTRY(pref.remote), remote);
 	g_free(host);
 	g_free(port);
 	g_free(login);
 	g_free(password);
+	g_free(remote);
 	
 	is_select_profiles_use_anonymous(&iter);
 	check_delete_button_sensitive(&iter);
@@ -1333,7 +1392,7 @@ static void on_document_save()
 		tmpdir = g_strconcat(tmp_dir, current_profile.login, "@", current_profile.host, "/", NULL);
 		dst = g_file_get_relative_path(g_file_new_for_path(tmpdir), g_file_new_for_path(filepath));
 		add_pending_item(0, dst, filepath);
-		if (redefine_parent_iter(dst)) add_pending_item(2, dst, NULL);
+		if (redefine_parent_iter(dst, FALSE)) add_pending_item(2, dst, NULL);
 		g_free(tmpdir);
 	}
 }
@@ -1376,7 +1435,7 @@ static void on_window_drag_data_received(GtkWidget *widget, GdkDragContext *drag
 		if (g_strcmp0(name, "./")==0 || g_strcmp0(name, "/")==0) name = "";
 		gchar *dst;
 		gchar *filepath;
-		redefine_parent_iter(name);
+		redefine_parent_iter(name, FALSE);
 		while (filename!=NULL) {
 			filepath = g_filename_from_uri(filename, NULL, NULL);
 			dst = g_strconcat(name, g_path_get_basename(filepath), NULL);
@@ -1555,7 +1614,9 @@ void plugin_init(GeanyData *data)
 	widget = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(widget),	GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
 	gtk_container_add(GTK_CONTAINER(widget), file_view);
+	gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(widget), file_view);
 	gtk_container_add(GTK_CONTAINER(frame1), widget);
+	fileview_scroll = widget;
 	
 	widget = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(widget),	GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -1585,7 +1646,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_box_pack_start(GTK_BOX(vbox), widget, FALSE, FALSE, 0);
 	
 	GtkListStore *store;
-	store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+	store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 	GtkTreeIter iter;
 	gtk_list_store_append(store, &iter);
 	gtk_list_store_set(store, &iter, 0, "New profile...", -1);
@@ -1607,7 +1668,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	
 	load_profiles(1);
 	
-	table = gtk_table_new(4, 4, FALSE);
+	table = gtk_table_new(5, 4, FALSE);
 	
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_button_new_from_stock(GTK_STOCK_DELETE);
@@ -1657,6 +1718,14 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "toggled", G_CALLBACK(on_show_password_toggled), NULL);
 	pref.showpass = widget;
+	
+	widget = gtk_label_new("Remote");
+	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 4, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
+	pref.remote = widget;
 	
 	gtk_box_pack_start(GTK_BOX(vbox), table, FALSE, FALSE, 0);
 	
