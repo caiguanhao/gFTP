@@ -3,6 +3,12 @@
 
 enum
 {
+	KB_CREATE_BLANK_FILE,
+	KB_COUNT
+};
+
+enum
+{
 	FILEVIEW_COLUMN_ICON = 0,
 	FILEVIEW_COLUMN_NAME,
 	FILEVIEW_COLUMN_DIR,
@@ -22,6 +28,7 @@ static gsize all_profiles_length;
 static gchar *profiles_file, *hosts_file, *tmp_dir;
 static gboolean running = FALSE;
 static gboolean to_abort = FALSE;
+static gint page_number = 0;
 
 #ifndef BASE64ENCODE_TIMES
 #define BASE64ENCODE_TIMES 8
@@ -45,7 +52,7 @@ struct transfer
 struct uploadf {
 	FILE *fp;
 	int transfered;
-	struct stat st;
+	int filesize;
 };
 
 struct commands {
