@@ -543,6 +543,12 @@ static void *create_file(gpointer p)
 	gchar *ulto = g_strdup((gchar *)p);
 	if (curl) {
 		ulto = g_strconcat(current_profile.url, ulto, NULL);
+		if (!g_utf8_validate(ulto, -1, NULL)) {
+			gdk_threads_enter();
+			dialogs_show_msgbox(GTK_MESSAGE_ERROR, "Error occurred. Try again later.");
+			gdk_threads_leave();
+			goto end;
+		}
 		gint64 port = g_ascii_strtoll(current_profile.port, NULL, 0);
 		if (port<=0 || port>65535) port=21;
 		curl_easy_setopt(curl, CURLOPT_URL, ulto);
@@ -553,6 +559,7 @@ static void *create_file(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_FTP_CREATE_MISSING_DIRS, 1L);
 		curl_easy_perform(curl);
 	}
+	end:
 	gdk_threads_enter();
 	gtk_widget_hide(geany->main_widgets->progressbar);
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
@@ -768,7 +775,7 @@ static void execute()
 			log_new_str(COLOR_BLUE, "Command request has been added to the pending list.");
 		} else if (utils_str_equal(icon, GTK_STOCK_NEW)) {
 			to_create_file(remote);
-			log_new_str(COLOR_BLUE, "Command request has been added to the pending list.");
+			log_new_str(COLOR_BLUE, "Create file request has been added to the pending list.");
 		} else {
 			running = FALSE;
 		}
@@ -867,21 +874,25 @@ static GtkWidget *create_popup_menu(void)
 	menu = gtk_menu_new();
 	
 	item = gtk_image_menu_item_new_from_stock(GTK_STOCK_OPEN, NULL);
-	gtk_widget_show(item);
+	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "_Open (Download/Edit)");
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_open_clicked), NULL);
 	
+	item = gtk_separator_menu_item_new();
+	gtk_container_add(GTK_CONTAINER(menu), item);
+	
 	item = gtk_image_menu_item_new_from_stock(GTK_STOCK_DIRECTORY, NULL);
 	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "Create _Folder");
-	gtk_widget_show(item);
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)1);
 	
 	item = gtk_image_menu_item_new_from_stock(GTK_STOCK_DELETE, NULL);
 	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "Delete _Empty Folder");
-	gtk_widget_show(item);
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)2);
+	
+	item = gtk_separator_menu_item_new();
+	gtk_container_add(GTK_CONTAINER(menu), item);
 	
 	item = gtk_image_menu_item_new_from_stock(GTK_STOCK_NEW, NULL);
 	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "Create _Blank File");
@@ -891,11 +902,25 @@ static GtkWidget *create_popup_menu(void)
 	gtk_window_add_accel_group(GTK_WINDOW(geany->main_widgets->window), kb_accel_group);
 	GeanyKeyBinding *kb = keybindings_get_item(plugin_key_group, KB_CREATE_BLANK_FILE);
 	gtk_widget_add_accelerator(item, "activate", kb_accel_group, kb->key, kb->mods, GTK_ACCEL_VISIBLE);
+	g_object_unref(kb_accel_group);
 	
-	gtk_widget_show(item);
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)3);
 	
+	item = gtk_image_menu_item_new_from_stock(GTK_STOCK_REMOVE, NULL);
+	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "_Delete File");
+	gtk_container_add(GTK_CONTAINER(menu), item);
+	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)4);
+	
+	item = gtk_separator_menu_item_new();
+	gtk_container_add(GTK_CONTAINER(menu), item);
+	
+	item = gtk_image_menu_item_new_from_stock(GTK_STOCK_EDIT, NULL);
+	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "_Rename");
+	gtk_container_add(GTK_CONTAINER(menu), item);
+	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)5);
+	
+	gtk_widget_show_all(menu);
 	return menu;
 }
 
@@ -1184,8 +1209,6 @@ static void check_delete_button_sensitive(GtkTreeIter *iter)
 	gtk_widget_set_sensitive(pref.delete, !is_edit_profiles_selected_nth_item(iter, "0"));
 }
 
-static gboolean adding = FALSE;
-
 static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 {
 	g_return_if_fail(adding==FALSE);
@@ -1210,8 +1233,8 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				}
 				if (g_strcmp0(name, ".")==0) name = "";
 				gchar *cmd = NULL;
-				cmd = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Please input folder name:\n(to create multi-level folders,\nuse Create Blank File instead)", g_utf8_strlen(cmd, -1)>0?cmd:"New Folder");
-				if (cmd) {
+				cmd = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Please input folder name:\n(to create multi-level folders,\nuse Create Blank File instead)", "New Folder");
+				if (cmd && g_utf8_strlen(cmd, -1)>0) {
 					add_pending_item(3, name, g_strdup_printf("MKD %s", cmd));
 					if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
 					g_free(cmd);
@@ -1240,14 +1263,51 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				}
 				if (g_strcmp0(name, ".")==0) name = "";
 				gchar *filename = NULL;
-				filename = dialogs_show_input("Create Blank File", GTK_WINDOW(geany->main_widgets->window), "Please input file name:\n(recursively create missing folders,\neg. multi/level/folder.htm)", g_utf8_strlen(filename, -1)>0?filename:"New File");
+				filename = dialogs_show_input("Create Blank File", GTK_WINDOW(geany->main_widgets->window), "Please input file name:\n(recursively create missing folders,\neg. multi/level/folder.htm)", "New File");
 				gchar *filepath;
-				if (filename) {
+				if (filename && g_utf8_strlen(filename, -1)>0) {
 					filepath = g_strdup_printf("%s%s", name, filename);
 					add_pending_item(55, filepath, "");
 					if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
 					g_free(filepath);
 					g_free(filename);
+				}
+				break;
+			case 4:
+				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
+					if (!is_folder_selected(list)) {
+						gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
+						gchar *dirname = NULL;
+						if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
+							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
+							if (dirname) {
+								add_pending_item(3, name, g_strdup_printf("DELE %s", dirname));
+								if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
+								g_free(dirname);
+							}
+						}
+					}
+				}
+				break;
+			case 5:
+				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
+					gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
+					gchar *dirname = NULL;
+					if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
+						gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
+						if (dirname) {
+							gchar *reto;
+							reto = dialogs_show_input("Rename To", GTK_WINDOW(geany->main_widgets->window), "Please input new folder name:", dirname);
+							if (reto && g_utf8_strlen(reto, -1)>0) {
+								if (g_strcmp0(reto, dirname)!=0) {
+									add_pending_item(3, name, g_strdup_printf("RNFR %s\nRNTO %s", dirname, reto));
+									if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
+								}
+								g_free(reto);
+							}
+							g_free(dirname);
+						}
+					}
 				}
 				break;
 		}

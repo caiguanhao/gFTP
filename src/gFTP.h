@@ -28,6 +28,7 @@ static gsize all_profiles_length;
 static gchar *profiles_file, *hosts_file, *tmp_dir;
 static gboolean running = FALSE;
 static gboolean to_abort = FALSE;
+static gboolean adding = FALSE;
 static gint page_number = 0;
 
 #ifndef BASE64ENCODE_TIMES
