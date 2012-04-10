@@ -3,9 +3,8 @@
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
-#include <time.h>
 #include "ftpparse.c"
+#include "gFTP.h"
 
 GeanyPlugin *geany_plugin;
 GeanyData *geany_data;
@@ -13,150 +12,7 @@ GeanyFunctions *geany_functions;
 
 PLUGIN_VERSION_CHECK(211)
 
-PLUGIN_SET_INFO("gFTP", "FTP", "1.0", "Cai Guanhao <caiguanhao@gmail.com>");
-
-enum
-{
-	FILEVIEW_COLUMN_ICON = 0,
-	FILEVIEW_COLUMN_NAME,
-	FILEVIEW_COLUMN_DIR,
-	FILEVIEW_COLUMN_INFO,
-	FILEVIEW_N_COLUMNS
-};
-
-static GtkWidget *box, *fileview_scroll;
-static GtkWidget *file_view, *pending_view;
-static GtkWidget *btn_connect;
-static GtkTreeStore *file_store;
-static GtkListStore *pending_store;
-static GtkTreeIter parent, current_pending;
-static CURL *curl;
-static gchar **all_profiles, **all_hosts;
-static gsize all_profiles_length;
-static gchar *profiles_file, *hosts_file, *tmp_dir;
-static gboolean running = FALSE;
-static gboolean to_abort = FALSE;
-
-#define BASE64ENCODE_TIMES 8
-
-GList *filelist;
-GList *dirlist;
-
-struct string
-{
-	char *ptr;
-	int len;
-};
-
-struct transfer
-{
-	char *from;
-	char *to;
-};
-
-struct uploadf {
-	FILE *fp;
-	int transfered;
-	struct stat st;
-};
-
-struct commands {
-	char *name;
-	struct curl_slist *list;
-};
-
-static struct
-{
-	GtkListStore *store;
-	GtkTreeIter iter_store_new;
-	GtkWidget *combo;
-	GtkWidget *delete;
-	GtkWidget *host;
-	GtkWidget *port;
-	GtkWidget *login;
-	GtkWidget *passwd;
-	GtkWidget *anon;
-	GtkWidget *showpass;
-	GtkWidget *remote;
-	GtkWidget *usecurrent;
-} pref;
-
-static struct
-{
-	GtkWidget *login;
-	GtkWidget *password;
-} retry;
-
-static struct 
-{
-	char *url;
-	int index;
-	char *host;
-	char *port;
-	char *login;
-	char *password;
-	char *remote;
-} current_profile;
-
-size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str)
-{
-	int new_len = str->len + size * nmemb;
-	str->ptr = realloc(str->ptr, new_len + 1);
-	memcpy(str->ptr + str->len, ptr, size * nmemb);
-	str->ptr[new_len] = '\0';
-	str->len = new_len;
-	return size*nmemb;
-}
-
-size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream)
-{
-	return fwrite(ptr, size, nmemb, stream);
-}
-
-static void add_pending_item(gint type, gchar *n1, gchar *n2);
-static void save_profiles(gint type);
-static void save_hosts();
-static void execute();
-static void execute_end(gint type);
-static void *disconnect(gpointer p);
-static void *to_get_dir_listing(gpointer p);
-static void on_retry_use_anonymous_toggled(GtkToggleButton *togglebutton, gpointer user_data)
-{
-	gboolean toggle = gtk_toggle_button_get_active(togglebutton);
-	gtk_widget_set_sensitive(retry.login, !toggle);
-	gtk_widget_set_sensitive(retry.password, !toggle);
-	if (toggle) {
-		gtk_entry_set_text(GTK_ENTRY(retry.login), "anonymous");
-		gtk_entry_set_text(GTK_ENTRY(retry.password), "ftp@example.com");
-	}
-}
-
-static void on_retry_show_password_toggled(GtkToggleButton *togglebutton, gpointer user_data)
-{
-	gtk_entry_set_visibility(GTK_ENTRY(retry.password), gtk_toggle_button_get_active(togglebutton));
-}
-
-static void on_retry_dialog_response(GtkDialog *dialog, gint response, gpointer user_data)
-{
-	if (response>0) {
-		current_profile.login = g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(retry.login)));
-		current_profile.password = g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(retry.password)));
-		if (response == 2) {
-			save_profiles(2);
-		}
-		add_pending_item(2, "", NULL);
-	} else {
-		disconnect(NULL);
-	}
-}
-
-static gboolean on_retry_entry_keypress(GtkWidget *widget, GdkEventKey *event, gpointer dialog)
-{
-	if (event->keyval == 0xff0d || event->keyval == 0xff8d) { //RETURN AND KEY PAD ENTER
-		gtk_dialog_response(GTK_DIALOG(dialog), 2);
-	}
-	return FALSE;
-}
+PLUGIN_SET_INFO("gFTP", "FTP Plugin for Geany.", "1.0", "Cai Guanhao <caiguanhao@gmail.com>");
 
 static void try_another_username_password()
 {
@@ -213,29 +69,6 @@ static void try_another_username_password()
 	gtk_widget_destroy(dialog);
 	
 	gdk_threads_leave();
-}
-
-static int download_progress (void *p, double dltotal, double dlnow, double ultotal, double ulnow)
-{
-	if (to_abort) return 1;
-	gdk_threads_enter();
-	double done=0.0;
-	int done2=0;
-	if(dlnow!=0&&dltotal!=0)done=(double)dlnow/dltotal;
-	if(dlnow!=0&&dltotal!=0)done2=(int)dlnow/dltotal*100;
-	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), done);
-	gchar *doneper = g_strdup_printf("%.2f%%", done*100);
-	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
-	gtk_list_store_set(GTK_LIST_STORE(pending_store), &current_pending, 1, doneper, 2, done2, -1);
-	g_free(doneper);
-	gdk_threads_leave();
-	return 0;
-}
-
-static int normal_progress (void *p, double dltotal, double dlnow, double ultotal, double ulnow)
-{
-	if (to_abort) return 1;
-	return 0;
 }
 
 static void msgwin_scroll_to_bottom()
@@ -351,37 +184,6 @@ static gchar *find_host (gchar *src)
 		g_strfreev(hostsparts);
 	}
 	return src;
-}
-
-static gboolean is_single_selection(GtkTreeSelection *treesel)
-{
-	if (gtk_tree_selection_count_selected_rows(treesel) == 1)
-		return TRUE;
-
-	ui_set_statusbar(FALSE, _("Too many items selected!"));
-	return FALSE;
-}
-
-static gboolean is_folder_selected(GList *selected_items)
-{
-	GList *item;
-	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
-	gboolean dir_found = FALSE;
-	for (item = selected_items; item != NULL; item = g_list_next(item)) {
-		gchar *icon;
-		GtkTreeIter iter;
-		GtkTreePath *treepath;
-		treepath = (GtkTreePath*) item->data;
-		gtk_tree_model_get_iter(model, &iter, treepath);
-		gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, -1);
-		if (utils_str_equal(icon, GTK_STOCK_DIRECTORY))	{
-			dir_found = TRUE;
-			g_free(icon);
-			break;
-		}
-		g_free(icon);
-	}
-	return dir_found;
 }
 
 static void add_pending_item(gint type, gchar *n1, gchar *n2)
@@ -575,16 +377,27 @@ static int to_list(const char *listdata)
 	return 0;
 }
 
-static void *disconnect(gpointer p)
+static int download_progress (void *p, double dltotal, double dlnow, double ultotal, double ulnow)
 {
-	to_abort = TRUE;
-	gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_CONNECT);
-	if (curl) {
-		log_new_str(COLOR_RED, "Disconnected.");
-		curl = NULL;
-	}
-	clear();
-	return NULL;
+	if (to_abort) return 1;
+	gdk_threads_enter();
+	double done=0.0;
+	int done2=0;
+	if(dlnow!=0&&dltotal!=0)done=(double)dlnow/dltotal;
+	if(dlnow!=0&&dltotal!=0)done2=(int)dlnow/dltotal*100;
+	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), done);
+	gchar *doneper = g_strdup_printf("%.2f%%", done*100);
+	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
+	gtk_list_store_set(GTK_LIST_STORE(pending_store), &current_pending, 1, doneper, 2, done2, -1);
+	g_free(doneper);
+	gdk_threads_leave();
+	return 0;
+}
+
+static int normal_progress (void *p, double dltotal, double dlnow, double ultotal, double ulnow)
+{
+	if (to_abort) return 1;
+	return 0;
 }
 
 static void open_external(const gchar *dir)
@@ -601,6 +414,40 @@ static void open_external(const gchar *dir)
 	}
 	g_free(locale_cmd);
 	g_free(cmd);
+}
+
+static size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str)
+{
+	int new_len = str->len + size * nmemb;
+	str->ptr = realloc(str->ptr, new_len + 1);
+	memcpy(str->ptr + str->len, ptr, size * nmemb);
+	str->ptr[new_len] = '\0';
+	str->len = new_len;
+	return size*nmemb;
+}
+
+static size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream)
+{
+	return fwrite(ptr, size, nmemb, stream);
+}
+
+static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *p)
+{
+	gdk_threads_enter();
+	struct uploadf *file = (struct uploadf *)p;
+	size_t retcode = fread(ptr, size, nmemb, file->fp);
+	file->transfered+=retcode;
+	double done=0.0;
+	int done2=0;
+	done=(double)file->transfered/file->st.st_size;
+	done2=(int)(done*100);
+	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), done);
+	gchar *doneper = g_strdup_printf("%.2f%%", done*100);
+	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
+	gtk_list_store_set(GTK_LIST_STORE(pending_store), &current_pending, 1, doneper, 2, done2, -1);
+	g_free(doneper);
+	gdk_threads_leave();
+	return retcode;
 }
 
 static void *download_file(gpointer p)
@@ -642,25 +489,6 @@ static void *download_file(gpointer p)
 	gdk_threads_leave();
 	g_thread_exit(NULL);
 	return NULL;
-}
-
-static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *p)
-{
-	gdk_threads_enter();
-	struct uploadf *file = (struct uploadf *)p;
-	size_t retcode = fread(ptr, size, nmemb, file->fp);
-	file->transfered+=retcode;
-	double done=0.0;
-	int done2=0;
-	done=(double)file->transfered/file->st.st_size;
-	done2=(int)(done*100);
-	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), done);
-	gchar *doneper = g_strdup_printf("%.2f%%", done*100);
-	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
-	gtk_list_store_set(GTK_LIST_STORE(pending_store), &current_pending, 1, doneper, 2, done2, -1);
-	g_free(doneper);
-	gdk_threads_leave();
-	return retcode;
 }
 
 static void *upload_file(gpointer p)
@@ -757,8 +585,6 @@ static void *get_dir_listing(gpointer p)
 	return NULL;
 }
 
-static void *to_get_dir_listing(gpointer p);
-
 static void *send_command(gpointer p)
 {
 	struct commands *comm = (struct commands *)p;
@@ -789,6 +615,44 @@ static void *send_command(gpointer p)
 	gdk_threads_leave();
 	g_thread_exit(NULL);
 	return NULL;
+}
+
+static void on_retry_use_anonymous_toggled(GtkToggleButton *togglebutton, gpointer user_data)
+{
+	gboolean toggle = gtk_toggle_button_get_active(togglebutton);
+	gtk_widget_set_sensitive(retry.login, !toggle);
+	gtk_widget_set_sensitive(retry.password, !toggle);
+	if (toggle) {
+		gtk_entry_set_text(GTK_ENTRY(retry.login), "anonymous");
+		gtk_entry_set_text(GTK_ENTRY(retry.password), "ftp@example.com");
+	}
+}
+
+static void on_retry_show_password_toggled(GtkToggleButton *togglebutton, gpointer user_data)
+{
+	gtk_entry_set_visibility(GTK_ENTRY(retry.password), gtk_toggle_button_get_active(togglebutton));
+}
+
+static void on_retry_dialog_response(GtkDialog *dialog, gint response, gpointer user_data)
+{
+	if (response>0) {
+		current_profile.login = g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(retry.login)));
+		current_profile.password = g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(retry.password)));
+		if (response == 2) {
+			save_profiles(2);
+		}
+		add_pending_item(2, "", NULL);
+	} else {
+		disconnect(NULL);
+	}
+}
+
+static gboolean on_retry_entry_keypress(GtkWidget *widget, GdkEventKey *event, gpointer dialog)
+{
+	if (event->keyval == 0xff0d || event->keyval == 0xff8d) { //RETURN AND KEY PAD ENTER
+		gtk_dialog_response(GTK_DIALOG(dialog), 2);
+	}
+	return FALSE;
 }
 
 static void *to_download_file(gpointer p)
@@ -892,97 +756,6 @@ static void execute_end(gint type)
 	}
 }
 
-static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
-{
-	gint type = (int)user_data;
-	GtkTreeSelection *treesel;
-	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
-	GList *list;
-	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
-	list = gtk_tree_selection_get_selected_rows(treesel, &model);
-	
-	if (is_single_selection(treesel)) {
-		GtkTreePath *treepath = list->data;
-		GtkTreeIter iter;
-		gtk_tree_model_get_iter(model, &iter, treepath);
-		gchar *name;
-		switch (type) {
-			case 1:
-				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
-					if (is_folder_selected(list)) {
-						gtk_tree_model_get_iter(model, &parent, treepath);
-						gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_DIR, &name, -1);
-					} else {
-						gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
-					}
-				} else {
-					gtk_tree_model_get_iter(model, &parent, treepath);
-					name="";
-				}
-				gchar *command = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Name", "New Folder");
-				if (command) add_pending_item(3, name, g_strdup_printf("MKD %s", command));
-				g_free(command);
-				break;
-			case 2:
-				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
-					if (is_folder_selected(list)) {
-						gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
-						gchar *dirname;
-						gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
-						if (dirname) add_pending_item(3, name, g_strdup_printf("RMD %s", dirname));
-						g_free(dirname);
-					}
-				}
-				break;
-		}
-	}
-	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
-	g_list_free(list);
-}
-
-static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
-{
-	GtkTreeSelection *treesel;
-	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
-	GList *list;
-	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
-	list = gtk_tree_selection_get_selected_rows(treesel, &model);
-	
-	if (is_single_selection(treesel)) {
-		GtkTreePath *treepath = list->data;
-		GtkTreeIter iter;
-		gtk_tree_model_get_iter(model, &iter, treepath);
-		gchar *name;
-		gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_DIR, &name, -1);
-		if (is_folder_selected(list)) {
-			gtk_tree_model_get_iter(model, &parent, treepath);
-			add_pending_item(2, name, NULL);
-			if (p) {
-				gchar *remote = (gchar *)p;
-				gchar **remoteparts = g_strsplit(remote, "/", 0);
-				gint i;
-				remote = g_strdup("");
-				for (i=0; i<g_strv_length(remoteparts); i++) {
-					if (g_strcmp0(remoteparts[i], "")!=0) {
-						remote = g_strconcat(remote, remoteparts[i], "/", NULL);
-						add_pending_item(2, remote, remote);
-					}
-				}
-			}
-		} else {
-			gchar *filepath;
-			filepath = g_strconcat(tmp_dir, current_profile.login, "@", current_profile.host, NULL);
-			if (g_strcmp0(g_path_get_dirname(name), ".")!=0)
-				filepath = g_strconcat(filepath, "/", g_path_get_dirname(name), NULL);
-			g_mkdir_with_parents(filepath, 0777);
-			filepath = g_strdup_printf("%s/%s", filepath, g_path_get_basename(name));
-			add_pending_item(1, name, filepath);
-		}
-	}
-	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
-	g_list_free(list);
-}
-
 static void menu_position_func(GtkMenu *menu, gint *x, gint *y, gboolean *push_in, gpointer user_data)
 {
 	GdkWindow *gdk_window;
@@ -994,8 +767,6 @@ static void menu_position_func(GtkMenu *menu, gint *x, gint *y, gboolean *push_i
 	*y += allocation.y + allocation.height;
 	*push_in = FALSE;
 }
-
-static void load_profiles(gint type);
 
 static void to_connect(GtkMenuItem *menuitem, int p)
 {
@@ -1033,24 +804,16 @@ static void to_connect(GtkMenuItem *menuitem, int p)
 	on_open_clicked(NULL, current_profile.remote);
 }
 
-static gchar *load_profile_property(gint index, gchar *field);
-
-static void on_connect_clicked(gpointer p)
+static void *disconnect(gpointer p)
 {
-	if (!curl) {
-		GtkWidget *item, *menu;
-		menu = gtk_menu_new();
-		gsize i;
-		for (i = 0; i < all_profiles_length; i++) {
-			item = gtk_menu_item_new_with_label(load_profile_property(i, "host"));
-			gtk_widget_show(item);
-			gtk_container_add(GTK_CONTAINER(menu), item);
-			g_signal_connect(item, "activate", G_CALLBACK(to_connect), (gpointer)i);
-		}
-		gtk_menu_popup(GTK_MENU(menu), NULL, NULL, (GtkMenuPositionFunc)menu_position_func, NULL, 0, GDK_CURRENT_TIME);
-	} else {
-		disconnect(NULL);
+	to_abort = TRUE;
+	gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_CONNECT);
+	if (curl) {
+		log_new_str(COLOR_RED, "Disconnected.");
+		curl = NULL;
 	}
+	clear();
+	return NULL;
 }
 
 static GtkWidget *create_popup_menu(void)
@@ -1182,24 +945,13 @@ static void load_profiles(gint type)
 	g_key_file_free(profiles);
 }
 
-static void load_hosts()
+static void select_profile(gint index)
 {
-	GKeyFile *hosts = g_key_file_new();
-	hosts_file = g_strconcat(geany->app->configdir, G_DIR_SEPARATOR_S, "plugins", G_DIR_SEPARATOR_S, "gFTP", G_DIR_SEPARATOR_S, "hosts.conf", NULL);
-	g_key_file_load_from_file(hosts, hosts_file, G_KEY_FILE_NONE, NULL);
-	gsize i;
-	all_hosts = g_key_file_get_groups(hosts, &i);
-	for (i = 0; i < g_strv_length(all_hosts); i++) {
-		all_hosts[i] = g_strconcat(all_hosts[i], " ", utils_get_setting_string(hosts, all_hosts[i], "ip_address", ""), NULL);
+	GtkTreeIter iter;
+	if (gtk_tree_model_iter_nth_child(GTK_TREE_MODEL(pref.store), &iter, NULL, index+2)) {
+		gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
+		on_edit_profiles_changed();
 	}
-	g_key_file_free(hosts);
-}
-
-static void load_settings(void)
-{
-	load_profiles(0);
-	load_hosts();
-	tmp_dir = g_strdup_printf("%s/gFTP/",(char *)g_get_tmp_dir());
 }
 
 static void save_profiles(gint type)
@@ -1298,22 +1050,55 @@ static void save_hosts()
 	g_key_file_free(hosts);
 }
 
-static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+static void load_hosts()
 {
-	if (event->button == 1 && event->type == GDK_2BUTTON_PRESS) {
-		on_open_clicked(NULL, NULL);
-		return TRUE;
-	} else if (event->button == 3) {
-		static GtkWidget *popup_menu = NULL;
-		if (popup_menu==NULL) popup_menu = create_popup_menu();
-		gtk_menu_popup(GTK_MENU(popup_menu), NULL, NULL, NULL, NULL, event->button, event->time);
+	GKeyFile *hosts = g_key_file_new();
+	hosts_file = g_strconcat(geany->app->configdir, G_DIR_SEPARATOR_S, "plugins", G_DIR_SEPARATOR_S, "gFTP", G_DIR_SEPARATOR_S, "hosts.conf", NULL);
+	g_key_file_load_from_file(hosts, hosts_file, G_KEY_FILE_NONE, NULL);
+	gsize i;
+	all_hosts = g_key_file_get_groups(hosts, &i);
+	for (i = 0; i < g_strv_length(all_hosts); i++) {
+		all_hosts[i] = g_strconcat(all_hosts[i], " ", utils_get_setting_string(hosts, all_hosts[i], "ip_address", ""), NULL);
 	}
+	g_key_file_free(hosts);
+}
+
+static void load_settings(void)
+{
+	load_profiles(0);
+	load_hosts();
+	tmp_dir = g_strdup_printf("%s/gFTP/",(char *)g_get_tmp_dir());
+}
+
+static gboolean is_single_selection(GtkTreeSelection *treesel)
+{
+	if (gtk_tree_selection_count_selected_rows(treesel) == 1)
+		return TRUE;
+
+	ui_set_statusbar(FALSE, _("Too many items selected!"));
 	return FALSE;
 }
 
-static void on_edit_preferences(void)
+static gboolean is_folder_selected(GList *selected_items)
 {
-	plugin_show_configure(geany_plugin);
+	GList *item;
+	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
+	gboolean dir_found = FALSE;
+	for (item = selected_items; item != NULL; item = g_list_next(item)) {
+		gchar *icon;
+		GtkTreeIter iter;
+		GtkTreePath *treepath;
+		treepath = (GtkTreePath*) item->data;
+		gtk_tree_model_get_iter(model, &iter, treepath);
+		gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, -1);
+		if (utils_str_equal(icon, GTK_STOCK_DIRECTORY))	{
+			dir_found = TRUE;
+			g_free(icon);
+			break;
+		}
+		g_free(icon);
+	}
+	return dir_found;
 }
 
 static gboolean is_edit_profiles_selected_nth_item(GtkTreeIter *iter, char *num)
@@ -1340,6 +1125,133 @@ static void is_select_profiles_use_anonymous(GtkTreeIter *iter)
 static void check_delete_button_sensitive(GtkTreeIter *iter)
 {
 	gtk_widget_set_sensitive(pref.delete, !is_edit_profiles_selected_nth_item(iter, "0"));
+}
+
+static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
+{
+	gint type = (int)user_data;
+	GtkTreeSelection *treesel;
+	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
+	GList *list;
+	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
+	list = gtk_tree_selection_get_selected_rows(treesel, &model);
+	
+	if (is_single_selection(treesel)) {
+		GtkTreePath *treepath = list->data;
+		GtkTreeIter iter;
+		gtk_tree_model_get_iter(model, &iter, treepath);
+		gchar *name;
+		switch (type) {
+			case 1:
+				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
+					if (is_folder_selected(list)) {
+						gtk_tree_model_get_iter(model, &parent, treepath);
+						gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+					} else {
+						gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
+					}
+				} else {
+					gtk_tree_model_get_iter(model, &parent, treepath);
+					name="";
+				}
+				gchar *command = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Name", "New Folder");
+				if (command) add_pending_item(3, name, g_strdup_printf("MKD %s", command));
+				g_free(command);
+				break;
+			case 2:
+				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
+					if (is_folder_selected(list)) {
+						gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
+						gchar *dirname;
+						gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
+						if (dirname) add_pending_item(3, name, g_strdup_printf("RMD %s", dirname));
+						g_free(dirname);
+					}
+				}
+				break;
+		}
+	}
+	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
+	g_list_free(list);
+}
+
+static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
+{
+	GtkTreeSelection *treesel;
+	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
+	GList *list;
+	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
+	list = gtk_tree_selection_get_selected_rows(treesel, &model);
+	
+	if (is_single_selection(treesel)) {
+		GtkTreePath *treepath = list->data;
+		GtkTreeIter iter;
+		gtk_tree_model_get_iter(model, &iter, treepath);
+		gchar *name;
+		gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+		if (is_folder_selected(list)) {
+			gtk_tree_model_get_iter(model, &parent, treepath);
+			add_pending_item(2, name, NULL);
+			if (p) {
+				gchar *remote = (gchar *)p;
+				gchar **remoteparts = g_strsplit(remote, "/", 0);
+				gint i;
+				remote = g_strdup("");
+				for (i=0; i<g_strv_length(remoteparts); i++) {
+					if (g_strcmp0(remoteparts[i], "")!=0) {
+						remote = g_strconcat(remote, remoteparts[i], "/", NULL);
+						add_pending_item(2, remote, remote);
+					}
+				}
+			}
+		} else {
+			gchar *filepath;
+			filepath = g_strconcat(tmp_dir, current_profile.login, "@", current_profile.host, NULL);
+			if (g_strcmp0(g_path_get_dirname(name), ".")!=0)
+				filepath = g_strconcat(filepath, "/", g_path_get_dirname(name), NULL);
+			g_mkdir_with_parents(filepath, 0777);
+			filepath = g_strdup_printf("%s/%s", filepath, g_path_get_basename(name));
+			add_pending_item(1, name, filepath);
+		}
+	}
+	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
+	g_list_free(list);
+}
+
+static void on_connect_clicked(gpointer p)
+{
+	if (!curl) {
+		GtkWidget *item, *menu;
+		menu = gtk_menu_new();
+		gsize i;
+		for (i = 0; i < all_profiles_length; i++) {
+			item = gtk_menu_item_new_with_label(load_profile_property(i, "host"));
+			gtk_widget_show(item);
+			gtk_container_add(GTK_CONTAINER(menu), item);
+			g_signal_connect(item, "activate", G_CALLBACK(to_connect), (gpointer)i);
+		}
+		gtk_menu_popup(GTK_MENU(menu), NULL, NULL, (GtkMenuPositionFunc)menu_position_func, NULL, 0, GDK_CURRENT_TIME);
+	} else {
+		disconnect(NULL);
+	}
+}
+
+static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+{
+	if (event->button == 1 && event->type == GDK_2BUTTON_PRESS) {
+		on_open_clicked(NULL, NULL);
+		return TRUE;
+	} else if (event->button == 3) {
+		static GtkWidget *popup_menu = NULL;
+		if (popup_menu==NULL) popup_menu = create_popup_menu();
+		gtk_menu_popup(GTK_MENU(popup_menu), NULL, NULL, NULL, NULL, event->button, event->time);
+	}
+	return FALSE;
+}
+
+static void on_edit_preferences(void)
+{
+	plugin_show_configure(geany_plugin);
 }
 
 static void *on_host_login_password_changed(GtkWidget *widget, GdkEventKey *event, GtkDialog *dialog)
@@ -1442,15 +1354,6 @@ static void on_edit_profiles_changed(void)
 	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pref.showpass), FALSE);
 }
 
-static void select_profile(gint index)
-{
-	GtkTreeIter iter;
-	if (gtk_tree_model_iter_nth_child(GTK_TREE_MODEL(pref.store), &iter, NULL, index+2)) {
-		gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
-		on_edit_profiles_changed();
-	}
-}
-
 static void on_delete_profile_clicked()
 {
 	GtkTreeIter iter;
@@ -1476,11 +1379,6 @@ static void on_document_save()
 		if (redefine_parent_iter(dst, FALSE)) add_pending_item(2, dst, NULL);
 		g_free(tmpdir);
 	}
-}
-
-static gboolean profiles_treeview_row_is_separator(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
-{
-	return is_edit_profiles_selected_nth_item(iter, "1");
 }
 
 static void on_configure_response(GtkDialog *dialog, gint response, gpointer user_data)
@@ -1537,6 +1435,11 @@ static gboolean drag_motion (GtkWidget *widget, GdkDragContext *context, gint x,
 	gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(file_view), x, y, &path, NULL, NULL, NULL);
 	gtk_tree_view_set_cursor(GTK_TREE_VIEW(file_view), path, NULL, FALSE);
 	return TRUE;
+}
+
+static gboolean profiles_treeview_row_is_separator(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+{
+	return is_edit_profiles_selected_nth_item(iter, "1");
 }
 
 static void prepare_file_view()
