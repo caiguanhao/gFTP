@@ -232,6 +232,12 @@ static int download_progress (void *p, double dltotal, double dlnow, double ulto
 	return 0;
 }
 
+static int normal_progress (void *p, double dltotal, double dlnow, double ultotal, double ulnow)
+{
+	if (to_abort) return 1;
+	return 0;
+}
+
 static void msgwin_scroll_to_bottom()
 {
 	GtkTreeView *MsgWin;
@@ -317,6 +323,15 @@ static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, vo
 		g_match_info_free(match_info);
 		g_regex_unref(regex);
 	}
+	if (gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
+		gchar *icon;
+		gint *pulse;
+		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 0, &icon, 3, &pulse, -1);
+		if (utils_str_equal(icon, GTK_STOCK_REFRESH) || utils_str_equal(icon, GTK_STOCK_EXECUTE)) {
+			gtk_list_store_set(pending_store, &current_pending, 3, pulse + 1, -1);
+		}
+		g_free(icon);
+	}
 	gdk_threads_leave();
 	if (g_regex_match_simple("^530", firstline, 0, 0)) {
 		curl_easy_reset(curl);
@@ -377,28 +392,28 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 			gtk_list_store_append(pending_store, &iter);
 			gtk_list_store_set(pending_store, &iter,
 			0, GTK_STOCK_GO_UP, 
-			1, "0%", 2, 0, 3, n1, 4, n2,
+			1, "0%", 2, 0, 3, -1, 4, n1, 5, n2,
 			-1);
 			break;
 		case 1: //download
 			gtk_list_store_append(pending_store, &iter);
 			gtk_list_store_set(pending_store, &iter,
 			0, GTK_STOCK_GO_DOWN, 
-			1, "0%", 2, 0, 3, n1, 4, n2,
+			1, "0%", 2, 0, 3, -1, 4, n1, 5, n2,
 			-1);
 			break;
 		case 2: //load dir
 			gtk_list_store_append(pending_store, &iter);
 			gtk_list_store_set(pending_store, &iter,
 			0, GTK_STOCK_REFRESH, 
-			1, "0%", 2, 0, 3, n1, 4, g_utf8_strlen(n2, -1)>0?n2:"",
+			1, "loading", 2, 0, 3, 0, 4, n1, 5, g_utf8_strlen(n2, -1)>0?n2:"",
 			-1);
 			break;
 		case 3: //commands
 			gtk_list_store_append(pending_store, &iter);
 			gtk_list_store_set(pending_store, &iter,
 			0, GTK_STOCK_EXECUTE, 
-			1, "0%", 2, 0, 3, n1, 4, n2,
+			1, "loading", 2, 0, 3, 0, 4, n1, 5, n2,
 			-1);
 			break;
 	}
@@ -714,16 +729,21 @@ static void *get_dir_listing(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_PASSWORD, current_profile.password);
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_function);
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &str);
+		curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, normal_progress);
+		curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
+		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
 		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
 		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 		curl_easy_perform(curl);
 	}
-	if (to_list(str.ptr)==0) {
-		gdk_threads_enter();
-		gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_DISCONNECT);
-		if (auto_scroll) fileview_scroll_to_iter(&parent);
-		gdk_threads_leave();
+	if (!to_abort) {
+		if (to_list(str.ptr)==0) {
+			gdk_threads_enter();
+			gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_DISCONNECT);
+			if (auto_scroll) fileview_scroll_to_iter(&parent);
+			gdk_threads_leave();
+		}
 	}
 	free(str.ptr);
 	end:
@@ -752,6 +772,9 @@ static void *send_command(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_PORT, port);
 		curl_easy_setopt(curl, CURLOPT_USERNAME, current_profile.login);
 		curl_easy_setopt(curl, CURLOPT_PASSWORD, current_profile.password);
+		curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, normal_progress);
+		curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
+		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
 		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
 		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
@@ -762,7 +785,7 @@ static void *send_command(gpointer p)
 	gdk_threads_enter();
 	ui_progress_bar_stop();
 	execute_end(3);
-	add_pending_item(2, name, NULL);
+	if (!to_abort) add_pending_item(2, name, NULL);
 	gdk_threads_leave();
 	g_thread_exit(NULL);
 	return NULL;
@@ -809,7 +832,7 @@ static void execute()
 	gchar *local;
 	if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pending_store), &current_pending)) {
 		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 
-		0, &icon, 3, &remote, 4, &local, -1);
+		0, &icon, 4, &remote, 5, &local, -1);
 		if (utils_str_equal(icon, GTK_STOCK_GO_UP)) {
 			struct transfer ul;
 			ul.from = g_strdup(local);
@@ -852,18 +875,19 @@ static void execute_end(gint type)
 {
 	gboolean delete = FALSE;
 	gchar *icon;
-	gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 0, &icon, -1);
-	
-	if (type==0 && utils_str_equal(icon, GTK_STOCK_GO_UP)) delete = TRUE;
-	if (type==1 && utils_str_equal(icon, GTK_STOCK_GO_DOWN)) delete = TRUE;
-	if (type==2 && utils_str_equal(icon, GTK_STOCK_REFRESH)) delete = TRUE;
-	if (type==3 && utils_str_equal(icon, GTK_STOCK_EXECUTE)) delete = TRUE;
-	
-	if (delete) 
-		gtk_list_store_remove(GTK_LIST_STORE(pending_store), &current_pending);
-	
+	if (gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
+		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 0, &icon, -1);
+		
+		if (type==0 && utils_str_equal(icon, GTK_STOCK_GO_UP)) delete = TRUE;
+		if (type==1 && utils_str_equal(icon, GTK_STOCK_GO_DOWN)) delete = TRUE;
+		if (type==2 && utils_str_equal(icon, GTK_STOCK_REFRESH)) delete = TRUE;
+		if (type==3 && utils_str_equal(icon, GTK_STOCK_EXECUTE)) delete = TRUE;
+		
+		if (delete) 
+			gtk_list_store_remove(GTK_LIST_STORE(pending_store), &current_pending);
+	}
 	running = FALSE;
-	if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pending_store), &current_pending)) {
+	if (!to_abort && gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pending_store), &current_pending)) {
 		execute();
 	}
 }
@@ -1330,6 +1354,7 @@ static void on_use_current_clicked(GtkButton *button, gpointer user_data)
 			if (!utils_str_equal(icon, GTK_STOCK_DIRECTORY))
 				name = g_path_get_dirname(name);
 		}
+		if (g_strcmp0(name, ".")==0) name = g_strconcat("", NULL);
 		if (g_utf8_strlen(name, -1)>0) {
 			name = g_strconcat("/", name, NULL);
 		}
@@ -1536,7 +1561,7 @@ static void prepare_pending_view()
 	pango_font_description_set_size(pfd, 8 * PANGO_SCALE);
 	gtk_widget_modify_font(pending_view, pfd);
 	
-	pending_store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING);
+	pending_store = gtk_list_store_new(6, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING);
 	gtk_tree_view_set_model(GTK_TREE_VIEW(pending_view), GTK_TREE_MODEL(pending_store));
 	g_object_unref(pending_store);
 	
@@ -1560,7 +1585,7 @@ static void prepare_pending_view()
 	gtk_widget_modify_font(widget, pfd);
 	gtk_widget_show(widget);
 	gtk_tree_view_column_set_widget(column, widget);
-	gtk_tree_view_column_set_attributes(column, progress_renderer, "text", 1, "value", 2, NULL);
+	gtk_tree_view_column_set_attributes(column, progress_renderer, "text", 1, "value", 2, "pulse", 3, NULL);
 	gtk_tree_view_append_column(GTK_TREE_VIEW(pending_view), column);
 	
 	column = gtk_tree_view_column_new();
@@ -1570,7 +1595,7 @@ static void prepare_pending_view()
 	gtk_widget_modify_font(widget, pfd);
 	gtk_widget_show(widget);
 	gtk_tree_view_column_set_widget(column, widget);
-	gtk_tree_view_column_set_attributes(column, text_renderer, "text", 3, NULL);
+	gtk_tree_view_column_set_attributes(column, text_renderer, "text", 4, NULL);
 	gtk_tree_view_append_column(GTK_TREE_VIEW(pending_view), column);
 	
 	column = gtk_tree_view_column_new();
@@ -1580,7 +1605,7 @@ static void prepare_pending_view()
 	gtk_widget_modify_font(widget, pfd);
 	gtk_widget_show(widget);
 	gtk_tree_view_column_set_widget(column, widget);
-	gtk_tree_view_column_set_attributes(column, text_renderer, "text", 4, NULL);
+	gtk_tree_view_column_set_attributes(column, text_renderer, "text", 5, NULL);
 	gtk_tree_view_append_column(GTK_TREE_VIEW(pending_view), column);
 	
 	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(pending_view), TRUE);
