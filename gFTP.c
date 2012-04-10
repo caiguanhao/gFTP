@@ -78,6 +78,7 @@ static struct
 	GtkWidget *anon;
 	GtkWidget *showpass;
 	GtkWidget *remote;
+	GtkWidget *usecurrent;
 } pref;
 
 static struct
@@ -390,7 +391,7 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 			gtk_list_store_append(pending_store, &iter);
 			gtk_list_store_set(pending_store, &iter,
 			0, GTK_STOCK_REFRESH, 
-			1, "0%", 2, 0, 3, n1, 4, n2?n2:"",
+			1, "0%", 2, 0, 3, n1, 4, g_utf8_strlen(n2, -1)>0?n2:"",
 			-1);
 			break;
 		case 3: //commands
@@ -1316,6 +1317,29 @@ static void *on_host_login_password_changed(GtkWidget *widget, GdkEventKey *even
 	return FALSE;
 }
 
+static void on_use_current_clicked(GtkButton *button, gpointer user_data)
+{
+	GtkTreePath *path;
+	GtkTreeIter iter;
+	gtk_tree_view_get_cursor(GTK_TREE_VIEW(file_view), &path, NULL);
+	if (path) {
+		gchar *name = "";
+		gchar *icon;
+		if (gtk_tree_model_get_iter(GTK_TREE_MODEL(file_store), &iter, path)) {
+			gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &name, -1);
+			if (!utils_str_equal(icon, GTK_STOCK_DIRECTORY))
+				name = g_path_get_dirname(name);
+		}
+		if (g_utf8_strlen(name, -1)>0) {
+			name = g_strconcat("/", name, NULL);
+		}
+		gtk_entry_set_text(GTK_ENTRY(pref.remote), name);
+		on_host_login_password_changed(NULL, NULL, NULL);
+		g_free(name);
+		g_free(icon);
+	}
+}
+
 static void on_use_anonymous_toggled(GtkToggleButton *togglebutton, gpointer user_data)
 {
 	gboolean toggle = gtk_toggle_button_get_active(togglebutton);
@@ -1368,6 +1392,15 @@ static void on_edit_profiles_changed(void)
 	is_select_profiles_use_anonymous(&iter);
 	check_delete_button_sensitive(&iter);
 	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pref.showpass), FALSE);
+}
+
+static void select_profile(gint index)
+{
+	GtkTreeIter iter;
+	if (gtk_tree_model_iter_nth_child(GTK_TREE_MODEL(pref.store), &iter, NULL, index+2)) {
+		gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
+		on_edit_profiles_changed();
+	}
 }
 
 static void on_delete_profile_clicked()
@@ -1672,6 +1705,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_button_new_from_stock(GTK_STOCK_DELETE);
+	gtk_widget_set_tooltip_text(widget, "Delete current profile.");
 	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "clicked", G_CALLBACK(on_delete_profile_clicked), NULL);
 	pref.delete = widget;
@@ -1681,6 +1715,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
+	gtk_widget_set_tooltip_text(widget, "FTP hostname.");
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
 	pref.host = widget;
@@ -1688,6 +1723,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	widget = gtk_label_new("Port");
 	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
+	gtk_widget_set_tooltip_text(widget, "Default FTP port number is 21.");
 	gtk_widget_set_size_request(widget, 40, -1);
 	gtk_entry_set_text(GTK_ENTRY(widget), "21");
 	gtk_table_attach(GTK_TABLE(table), widget, 3, 4, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
@@ -1698,10 +1734,12 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
+	gtk_widget_set_tooltip_text(widget, "Username for FTP login. Can be left blank.");
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
 	pref.login = widget;
 	widget = gtk_check_button_new_with_label("Anonymous");
+	gtk_widget_set_tooltip_text(widget, "Use anonymous username and password.");
 	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "toggled", G_CALLBACK(on_use_anonymous_toggled), NULL);
 	pref.anon = widget;
@@ -1710,11 +1748,13 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
+	gtk_widget_set_tooltip_text(widget, "Password for FTP login. Can be left blank.");
 	gtk_entry_set_visibility(GTK_ENTRY(widget), FALSE);
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
 	pref.passwd = widget;
 	widget = gtk_check_button_new_with_label("Show");
+	gtk_widget_set_tooltip_text(widget, "Show password.");
 	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "toggled", G_CALLBACK(on_show_password_toggled), NULL);
 	pref.showpass = widget;
@@ -1723,15 +1763,25 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
-	gtk_table_attach(GTK_TABLE(table), widget, 1, 4, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_widget_set_tooltip_text(widget, "Initial remote directory.");
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), NULL);
 	pref.remote = widget;
-	
+	widget = gtk_button_new_with_mnemonic("_Use Current");
+	if (!curl) gtk_widget_set_sensitive(widget, FALSE);
+	gtk_widget_set_tooltip_text(widget, "Use location of currently selected item as initial remote directory.");
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_use_current_clicked), NULL);
+	pref.usecurrent = widget;
+
 	gtk_box_pack_start(GTK_BOX(vbox), table, FALSE, FALSE, 0);
 	
 	gtk_widget_show_all(vbox);
 	
 	g_signal_connect(dialog, "response", G_CALLBACK(on_configure_response), NULL);
+	
+	if (curl) 
+		select_profile(current_profile.index);
 	return vbox;
 }
 
