@@ -25,7 +25,7 @@ static GtkTreeIter parent, current_pending;
 static CURL *curl;
 static gchar **all_profiles, **all_hosts;
 static gsize all_profiles_length;
-static gchar *profiles_file, *hosts_file, *tmp_dir;
+static gchar *config_file, *profiles_file, *hosts_file, *tmp_dir;
 static gboolean running = FALSE;
 static gboolean to_abort = FALSE;
 static gboolean adding = FALSE;
@@ -75,6 +75,7 @@ static struct
 	GtkWidget *showpass;
 	GtkWidget *remote;
 	GtkWidget *usecurrent;
+	GtkWidget *showhiddenfiles;
 } pref;
 
 static struct
@@ -82,6 +83,11 @@ static struct
 	GtkWidget *login;
 	GtkWidget *password;
 } retry;
+
+static struct 
+{
+	gboolean showhiddenfiles;
+} current_settings;
 
 static struct 
 {

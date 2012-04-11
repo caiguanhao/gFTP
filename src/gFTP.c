@@ -603,6 +603,8 @@ static void *get_dir_listing(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
 		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
 		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+		if (current_settings.showhiddenfiles)
+			curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "LIST -a");
 		curl_easy_perform(curl);
 	}
 	if (!to_abort) {
@@ -920,6 +922,14 @@ static GtkWidget *create_popup_menu(void)
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)5);
 	
+	item = gtk_separator_menu_item_new();
+	gtk_container_add(GTK_CONTAINER(menu), item);
+	
+	item = gtk_check_menu_item_new_with_mnemonic("Show _Hidden Files");
+	gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), current_settings.showhiddenfiles);
+	gtk_container_add(GTK_CONTAINER(menu), item);
+	g_signal_connect(item, "toggled", G_CALLBACK(on_menu_item_clicked), (gpointer)99);
+	
 	gtk_widget_show_all(menu);
 	return menu;
 }
@@ -1111,6 +1121,24 @@ static void save_profiles(gint type)
 	g_key_file_free(profiles);
 }
 
+static void save_settings()
+{
+	GKeyFile *config = g_key_file_new();
+	gchar *data;
+	gchar *config_dir = g_path_get_dirname(config_file);
+	g_key_file_load_from_file(config, config_file, G_KEY_FILE_NONE, NULL);
+	
+	g_key_file_set_boolean(config, "gFTP-main", "show_hidden_files", current_settings.showhiddenfiles);
+	
+	if (g_file_test(config_dir, G_FILE_TEST_IS_DIR) && utils_mkdir(config_dir, TRUE) == 0) {
+		data = g_key_file_to_data(config, NULL, NULL);
+		utils_write_file(config_file, data);
+		g_free(data);
+	}
+	g_free(config_dir);
+	g_key_file_free(config);
+}
+
 static void save_hosts()
 {
 	GKeyFile *hosts = g_key_file_new();
@@ -1147,6 +1175,12 @@ static void load_hosts()
 
 static void load_settings(void)
 {
+	GKeyFile *settings = g_key_file_new();
+	config_file = g_strconcat(geany->app->configdir, G_DIR_SEPARATOR_S, "plugins", G_DIR_SEPARATOR_S, "gFTP", G_DIR_SEPARATOR_S, "settings.conf", NULL);
+	g_key_file_load_from_file(settings, config_file, G_KEY_FILE_NONE, NULL);
+	current_settings.showhiddenfiles = utils_get_setting_boolean(settings, "gFTP-main", "show_hidden_files", FALSE);
+	g_key_file_free(settings);
+	
 	load_profiles(0);
 	load_hosts();
 	tmp_dir = g_strdup_printf("%s/gFTP/",(char *)g_get_tmp_dir());
@@ -1310,6 +1344,15 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 					}
 				}
 				break;
+			case 99:
+				current_settings.showhiddenfiles = 	gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(menuitem));
+				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+				if (!is_folder_selected(list)) {
+					name = g_path_get_dirname(name);
+				}
+				if (g_strcmp0(name, ".")==0) name = "";
+				if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
+				break;
 		}
 	}
 	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
@@ -1380,14 +1423,24 @@ static void on_connect_clicked(gpointer p)
 
 static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
 {
-	if (event->button == 1 && event->type == GDK_2BUTTON_PRESS) {
-		on_open_clicked(NULL, NULL);
-		return TRUE;
-	} else if (event->button == 3) {
-		static GtkWidget *popup_menu = NULL;
-		if (popup_menu==NULL) popup_menu = create_popup_menu();
-		gtk_menu_popup(GTK_MENU(popup_menu), NULL, NULL, NULL, NULL, event->button, event->time);
+	GtkTreeSelection *treesel;
+	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
+	GList *list;
+	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
+	list = gtk_tree_selection_get_selected_rows(treesel, &model);
+	
+	if (is_single_selection(treesel)) {
+		if (event->button == 1 && event->type == GDK_2BUTTON_PRESS) {
+			on_open_clicked(NULL, NULL);
+			return TRUE;
+		} else if (event->button == 3) {
+			static GtkWidget *popup_menu = NULL;
+			if (popup_menu==NULL) popup_menu = create_popup_menu();
+			gtk_menu_popup(GTK_MENU(popup_menu), NULL, NULL, NULL, NULL, event->button, event->time);
+		}
 	}
+	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
+	g_list_free(list);
 	return FALSE;
 }
 
@@ -1527,6 +1580,7 @@ static void on_configure_response(GtkDialog *dialog, gint response, gpointer use
 {
 	if (response == GTK_RESPONSE_OK || response == GTK_RESPONSE_APPLY)
 	{
+		save_settings();
 		save_profiles(1);
 	}
 }
@@ -1775,14 +1829,11 @@ void plugin_init(GeanyData *data)
 
 GtkWidget *plugin_configure(GtkDialog *dialog)
 {
-	GtkWidget *widget, *vbox, *table;
+	GtkWidget *widget, *vbox, *hbox, *table, *notebook;
 	
 	vbox = gtk_vbox_new(FALSE, 6);
 	
-	widget = gtk_label_new("<b>Profiles</b>");
-	gtk_label_set_use_markup(GTK_LABEL(widget), TRUE);
-	gtk_misc_set_alignment(GTK_MISC(widget), 0, 0.5);
-	gtk_box_pack_start(GTK_BOX(vbox), widget, FALSE, FALSE, 0);
+	notebook = gtk_notebook_new();
 	
 	GtkListStore *store;
 	store = gtk_list_store_new(5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
@@ -1879,8 +1930,16 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "clicked", G_CALLBACK(on_use_current_clicked), NULL);
 	pref.usecurrent = widget;
-
-	gtk_box_pack_start(GTK_BOX(vbox), table, FALSE, FALSE, 0);
+	
+	hbox = gtk_hbox_new(FALSE, 6);
+	widget = gtk_image_new_from_stock(GTK_STOCK_DND_MULTIPLE, GTK_ICON_SIZE_MENU);
+	gtk_box_pack_start(GTK_BOX(hbox), widget, FALSE, FALSE, 0);
+	widget = gtk_label_new("Profiles");
+	gtk_box_pack_start(GTK_BOX(hbox), widget, FALSE, FALSE, 0);
+	gtk_widget_show_all(hbox);
+	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), table, hbox);
+	
+	gtk_box_pack_start(GTK_BOX(vbox), notebook, FALSE, FALSE, 0);
 	
 	gtk_widget_show_all(vbox);
 	
@@ -1894,7 +1953,10 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 void plugin_cleanup(void)
 {
 	curl_global_cleanup();
+	save_settings();
+	g_free(config_file);
 	g_free(profiles_file);
+	g_free(hosts_file);
 	g_free(tmp_dir);
 	g_strfreev(all_profiles);
 	gtk_widget_destroy(box);
