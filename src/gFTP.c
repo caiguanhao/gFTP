@@ -109,6 +109,7 @@ static void fileview_scroll_to_iter(GtkTreeIter *iter)
 
 static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, void *userp)
 {
+	if (to_abort) return 0;
 	char * odata;
 	odata = g_strstrip(g_strdup_printf("%s", data));
 	char * firstline;
@@ -159,7 +160,7 @@ static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, vo
 		g_regex_unref(regex);
 	}
 	if (gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
-		gint *pulse;
+		gint pulse;
 		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 3, &pulse, -1);
 		if (pulse>=0) {
 			gtk_list_store_set(pending_store, &current_pending, 3, pulse + 1, -1);
@@ -344,12 +345,15 @@ static void clear()
 {
 	gtk_tree_store_clear(file_store);
 	gtk_list_store_clear(pending_store);
+	gtk_tree_view_columns_autosize(GTK_TREE_VIEW(file_view));
+	gtk_tree_view_columns_autosize(GTK_TREE_VIEW(pending_view));
 	gtk_widget_hide(geany->main_widgets->progressbar);
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
 }
 
 static int to_list(const char *listdata)
 {
+	if (to_abort) return 1;
 	if (strlen(listdata)==0) return 1;
 	char * odata;
 	odata = g_strdup_printf("%s", listdata);
@@ -393,9 +397,11 @@ static int download_progress (void *p, double dltotal, double dlnow, double ulto
 	if(dlnow!=0&&dltotal!=0)done=(double)dlnow/dltotal;
 	if(dlnow!=0&&dltotal!=0)done2=(int)dlnow/dltotal*100;
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), done);
-	gchar *doneper = g_strdup_printf("%.2f%%", done*100);
-	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
+	gchar *doneper;
+	doneper = g_strdup_printf("%.2f%%", done*100);
 	gtk_list_store_set(GTK_LIST_STORE(pending_store), &current_pending, 1, doneper, 2, done2, -1);
+	doneper = g_strdup_printf("%.2f%% (%s)", done*100, g_format_size_for_display(dlnow));
+	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
 	g_free(doneper);
 	gdk_threads_leave();
 	return 0;
@@ -440,6 +446,7 @@ static size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream)
 
 static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *p)
 {
+	if (to_abort) return 0;
 	gdk_threads_enter();
 	struct uploadf *file = (struct uploadf *)p;
 	size_t retcode = fread(ptr, size, nmemb, file->fp);
@@ -449,9 +456,11 @@ static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *p)
 	done=(double)file->transfered/file->filesize;
 	done2=(int)(done*100);
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), done);
-	gchar *doneper = g_strdup_printf("%.2f%%", done*100);
-	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
+	gchar *doneper;
+	doneper = g_strdup_printf("%.2f%%", done*100);
 	gtk_list_store_set(GTK_LIST_STORE(pending_store), &current_pending, 1, doneper, 2, done2, -1);
+	doneper = g_strdup_printf("%.2f%% (%s)", done*100, g_format_size_for_display(file->transfered));
+	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
 	g_free(doneper);
 	gdk_threads_leave();
 	return retcode;
@@ -800,8 +809,10 @@ static void execute_end(gint type)
 		if (type==3 && utils_str_equal(icon, GTK_STOCK_EXECUTE)) delete = TRUE;
 		if (type==55 && utils_str_equal(icon, GTK_STOCK_NEW)) delete = TRUE;
 		
-		if (delete) 
+		if (delete) {
 			gtk_list_store_remove(GTK_LIST_STORE(pending_store), &current_pending);
+			gtk_tree_view_columns_autosize(GTK_TREE_VIEW(pending_view));
+		}
 	}
 	running = FALSE;
 	if (!to_abort && gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pending_store), &current_pending)) {
