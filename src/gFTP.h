@@ -56,11 +56,6 @@ struct uploadf {
 	int filesize;
 };
 
-struct commands {
-	char *name;
-	struct curl_slist *list;
-};
-
 static struct
 {
 	GtkListStore *store;
@@ -72,6 +67,7 @@ static struct
 	GtkWidget *login;
 	GtkWidget *passwd;
 	GtkWidget *anon;
+	gulong anon_handler_id;
 	GtkWidget *showpass;
 	GtkWidget *remote;
 	GtkWidget *usecurrent;

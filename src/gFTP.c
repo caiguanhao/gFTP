@@ -296,7 +296,7 @@ static gboolean redefine_parent_iter(gchar *src, gboolean strict_mode)
 		p1:
 		if (g_strcmp0("", srcs[i])==0) {
 			parent = parent_iter;
-			goto true;
+			return TRUE;
 		} else {
 			if (gtk_tree_model_iter_children(GTK_TREE_MODEL(file_store), &iter, &parent_iter)) {
 				p2:
@@ -308,27 +308,19 @@ static gboolean redefine_parent_iter(gchar *src, gboolean strict_mode)
 						goto p1;
 					} else {
 						parent = iter;
-						goto true;
+						return TRUE;
 					}
 				} else {
 					valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(file_store), &iter);
 					if (valid) goto p2; else if(!strict_mode) {
 						parent = parent_iter;
-						goto true;
+						return TRUE;
 					}
 				}
 			}
 		}
 	}
-	g_free(name);
-	g_free(icon);
-	g_strfreev(srcs);
 	return FALSE;
-	true:
-	g_free(name);
-	g_free(icon);
-	g_strfreev(srcs);
-	return TRUE;
 }
 
 static void clear_children()
@@ -549,15 +541,9 @@ static void *upload_file(gpointer p)
 
 static void *create_file(gpointer p)
 {
-	gchar *ulto = g_strdup((gchar *)p);
+	gchar *ulto = (gchar *)p;
 	if (curl) {
 		ulto = g_strconcat(current_profile.url, ulto, NULL);
-		if (!g_utf8_validate(ulto, -1, NULL)) {
-			gdk_threads_enter();
-			dialogs_show_msgbox(GTK_MESSAGE_ERROR, "Error occurred. Try again later.");
-			gdk_threads_leave();
-			goto end;
-		}
 		gint64 port = g_ascii_strtoll(current_profile.port, NULL, 0);
 		if (port<=0 || port>65535) port=21;
 		curl_easy_setopt(curl, CURLOPT_URL, ulto);
@@ -566,9 +552,11 @@ static void *create_file(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_PASSWORD, current_profile.password);
 		curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
 		curl_easy_setopt(curl, CURLOPT_FTP_CREATE_MISSING_DIRS, 1L);
+		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
+		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
+		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 		curl_easy_perform(curl);
 	}
-	end:
 	gdk_threads_enter();
 	gtk_widget_hide(geany->main_widgets->progressbar);
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
@@ -638,10 +626,11 @@ static void *get_dir_listing(gpointer p)
 
 static void *send_command(gpointer p)
 {
-	struct commands *comm = (struct commands *)p;
-	gchar *name = g_strdup(comm->name);
-	const char *url = g_strconcat(current_profile.url, name, NULL);
-	struct curl_slist *headers = comm->list;
+	gchar *comm = (gchar *)p;
+	gchar **comms = g_strsplit(comm, "\n", 0);
+	gint i;
+	const char *url = g_strconcat(current_profile.url, comms[0], NULL);
+	struct curl_slist *headers = NULL;
 	if (curl) {
 		gint64 port = g_ascii_strtoll(current_profile.port, NULL, 0);
 		if (port<=0 || port>65535) port=21;
@@ -655,14 +644,17 @@ static void *send_command(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
 		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
 		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+		for (i=1; i<g_strv_length(comms); i++)
+			headers = curl_slist_append(headers, comms[i]);
 		curl_easy_setopt(curl, CURLOPT_POSTQUOTE, headers);
 		curl_easy_perform(curl);
 	}
-	curl_slist_free_all(headers);
 	gdk_threads_enter();
 	ui_progress_bar_stop();
 	execute_end(3);
 	gdk_threads_leave();
+	g_strfreev(comms);
+	g_free(comm);
 	g_thread_exit(NULL);
 	return NULL;
 }
@@ -675,6 +667,9 @@ static void on_retry_use_anonymous_toggled(GtkToggleButton *togglebutton, gpoint
 	if (toggle) {
 		gtk_entry_set_text(GTK_ENTRY(retry.login), "anonymous");
 		gtk_entry_set_text(GTK_ENTRY(retry.password), "ftp@example.com");
+	} else if(g_strcmp0(gtk_entry_get_text(GTK_ENTRY(retry.login)), "anonymous")==0) {
+		gtk_entry_set_text(GTK_ENTRY(retry.login), "");
+		gtk_entry_set_text(GTK_ENTRY(retry.password), "");
 	}
 }
 
@@ -774,18 +769,14 @@ static void execute()
 			to_download_file(&dl);
 			log_new_str(COLOR_BLUE, "Download request has been added to the pending list.");
 		} else if (utils_str_equal(icon, GTK_STOCK_EXECUTE)) {
-			gchar **comms = g_strsplit(local, "\n", 0);
-			gint i;
-			struct commands comm;
-			comm.name = g_strdup(remote);
-			comm.list = NULL;
-			for (i=0; i<g_strv_length(comms); i++)
-				comm.list = curl_slist_append(comm.list, comms[i]);
-			g_strfreev(comms);
-			to_send_commands(&comm);
+			gchar *comm;
+			comm = g_strconcat(remote, "\n", local, NULL);
+			to_send_commands(comm);
 			log_new_str(COLOR_BLUE, "Command request has been added to the pending list.");
 		} else if (utils_str_equal(icon, GTK_STOCK_NEW)) {
-			to_create_file(remote);
+			gchar *cf;
+			cf = g_strconcat(remote, NULL);
+			to_create_file(cf);
 			log_new_str(COLOR_BLUE, "Create file request has been added to the pending list.");
 		} else {
 			running = FALSE;
@@ -1120,7 +1111,7 @@ static void save_profiles(gint type)
 			break;
 		}
 	}
-	if (!g_file_test(profiles_dir, G_FILE_TEST_IS_DIR) || utils_mkdir(profiles_dir, TRUE)!=0) {
+	if (g_mkdir_with_parents(profiles_dir, 0777)!=0) {
 		dialogs_show_msgbox(GTK_MESSAGE_ERROR, "Plugin configuration directory could not be created.");
 	} else {
 		all_profiles = g_key_file_get_groups(profiles, &all_profiles_length);
@@ -1141,7 +1132,7 @@ static void save_settings()
 	
 	g_key_file_set_boolean(config, "gFTP-main", "show_hidden_files", current_settings.showhiddenfiles);
 	
-	if (g_file_test(config_dir, G_FILE_TEST_IS_DIR) && utils_mkdir(config_dir, TRUE) == 0) {
+	if (g_mkdir_with_parents(config_dir, 0777) == 0) {
 		data = g_key_file_to_data(config, NULL, NULL);
 		utils_write_file(config_file, data);
 		g_free(data);
@@ -1162,7 +1153,7 @@ static void save_hosts()
 		g_key_file_set_string(hosts, hostsparts[0], "ip_address", hostsparts[1]);
 		g_strfreev(hostsparts);
 	}
-	if (g_file_test(hosts_dir, G_FILE_TEST_IS_DIR) && utils_mkdir(hosts_dir, TRUE)==0) {
+	if (g_mkdir_with_parents(hosts_dir, 0777)==0) {
 		data = g_key_file_to_data(hosts, NULL, NULL);
 		utils_write_file(hosts_file, data);
 		g_free(data);
@@ -1244,7 +1235,10 @@ static void is_select_profiles_use_anonymous(GtkTreeIter *iter)
 		}
 	}
 	g_free(login);
+	
+	g_signal_handler_block(pref.anon, pref.anon_handler_id);
 	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pref.anon), toggle);
+	g_signal_handler_unblock(pref.anon, pref.anon_handler_id);
 	gtk_widget_set_sensitive(pref.login, !toggle);
 	gtk_widget_set_sensitive(pref.passwd, !toggle);
 }
@@ -1514,6 +1508,9 @@ static void on_use_anonymous_toggled(GtkToggleButton *togglebutton, gpointer use
 	if (toggle) {
 		gtk_entry_set_text(GTK_ENTRY(pref.login), "anonymous");
 		gtk_entry_set_text(GTK_ENTRY(pref.passwd), "ftp@example.com");
+	} else if(g_strcmp0(gtk_entry_get_text(GTK_ENTRY(pref.login)), "anonymous")==0) {
+		gtk_entry_set_text(GTK_ENTRY(pref.login), "");
+		gtk_entry_set_text(GTK_ENTRY(pref.passwd), "");
 	}
 	on_host_login_password_changed(NULL, NULL, NULL);
 }
@@ -1909,7 +1906,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	widget = gtk_check_button_new_with_label("Anonymous");
 	gtk_widget_set_tooltip_text(widget, "Use anonymous username and password.");
 	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
-	g_signal_connect(widget, "toggled", G_CALLBACK(on_use_anonymous_toggled), NULL);
+	pref.anon_handler_id = g_signal_connect(widget, "toggled", G_CALLBACK(on_use_anonymous_toggled), NULL);
 	pref.anon = widget;
 	
 	widget = gtk_label_new("Password");
