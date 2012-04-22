@@ -79,6 +79,7 @@ static struct
 	GtkWidget *showpass;
 	GtkWidget *remote;
 	GtkWidget *usecurrent;
+	GtkWidget *local;
 	GtkWidget *showhiddenfiles;
 } pref;
 
@@ -102,6 +103,7 @@ static struct
 	char *login;
 	char *password;
 	char *remote;
+	char *local;
 } current_profile;
 
 static void add_pending_item(gint type, gchar *n1, gchar *n2);
