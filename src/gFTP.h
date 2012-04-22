@@ -70,6 +70,7 @@ static struct
 	GtkTreeIter iter_store_new;
 	GtkWidget *combo;
 	GtkWidget *delete;
+	GtkWidget *name;
 	GtkWidget *host;
 	GtkWidget *port;
 	GtkWidget *login;
@@ -80,6 +81,8 @@ static struct
 	GtkWidget *remote;
 	GtkWidget *usecurrent;
 	GtkWidget *local;
+	GtkWidget *webhost;
+	GtkWidget *prefix;
 	GtkWidget *showhiddenfiles;
 } pref;
 
@@ -98,12 +101,15 @@ static struct
 {
 	char *url;
 	int index;
+	char *name;
 	char *host;
 	char *port;
 	char *login;
 	char *password;
 	char *remote;
 	char *local;
+	char *webhost;
+	char *prefix;
 } current_profile;
 
 static void add_pending_item(gint type, gchar *n1, gchar *n2);
@@ -116,6 +122,7 @@ static void *to_get_dir_listing(gpointer p);
 static void load_profiles(gint type);
 static gchar *load_profile_property(gint index, gchar *field);
 static void on_edit_profiles_changed(void);
+static void on_edit_preferences(void);
 static void on_open_clicked(GtkMenuItem *menuitem, gpointer p);
 static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data);
 static gboolean on_retry_entry_keypress(GtkWidget *widget, GdkEventKey *event, gpointer dialog);
@@ -124,5 +131,6 @@ static void on_retry_show_password_toggled(GtkToggleButton *togglebutton, gpoint
 static void on_retry_dialog_response(GtkDialog *dialog, gint response, gpointer user_data);
 static size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream);
 static size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str);
+static gboolean focus_widget(gpointer p);
 
 #endif
