@@ -50,10 +50,18 @@ struct transfer
 	char *to;
 };
 
+struct rate
+{
+	double prev_s;
+	GTimeVal prev_t;
+};
+
 struct uploadf {
 	FILE *fp;
 	int transfered;
 	int filesize;
+	double prev_s;
+	GTimeVal prev_t;
 };
 
 static struct

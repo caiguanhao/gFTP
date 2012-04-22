@@ -167,7 +167,7 @@ static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, vo
 		}
 	}
 	gdk_threads_leave();
-	if (g_regex_match_simple("^530", firstline, 0, 0)) {
+	if (g_regex_match_simple("^530|500\\sUSER", firstline, 0, 0)) {
 		curl_easy_reset(curl);
 		try_another_username_password();
 	}
@@ -269,7 +269,7 @@ static int add_item(gpointer data, gboolean is_dir)
 	FILEVIEW_COLUMN_ICON, is_dir?GTK_STOCK_DIRECTORY:GTK_STOCK_FILE, 
 	FILEVIEW_COLUMN_NAME, parts[0], 
 	FILEVIEW_COLUMN_DIR, filename, 
-	FILEVIEW_COLUMN_INFO, g_strdup_printf("%s/%s\nSize:\t%s\nModified:\t%s", is_dir?"Folder:\t":"File:\t\t", filename, tsize, buffer) , 
+	FILEVIEW_COLUMN_INFO, g_strdup_printf("/%s\n%s\n%s", filename, tsize, buffer) , 
 	-1);
 	g_free(filename);
 	g_free(tsize);
@@ -392,8 +392,20 @@ static int download_progress (void *p, double dltotal, double dlnow, double ulto
 	gchar *doneper;
 	doneper = g_strdup_printf("%.2f%%", done*100);
 	gtk_list_store_set(GTK_LIST_STORE(pending_store), &current_pending, 1, doneper, 2, done2, -1);
-	doneper = g_strdup_printf("%.2f%% (%s)", done*100, g_format_size_for_display(dlnow));
-	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
+	struct rate *dlspeed = (struct rate *)p;
+	GTimeVal now;
+	g_get_current_time(&now);
+	double now_us = (double)(now.tv_sec + now.tv_usec/10E5);
+	double prev_us = (double)(dlspeed->prev_t.tv_sec + dlspeed->prev_t.tv_usec/10E5);
+	double speed;
+	if (dlnow!=0 && now_us - prev_us > 0.1) {
+		speed = (dlnow - dlspeed->prev_s)/(now_us - prev_us);
+		doneper = g_strdup_printf("%s (%s/s)", g_format_size_for_display(dlnow), g_format_size_for_display(speed));
+		gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
+		
+		dlspeed->prev_s = dlnow;
+		g_get_current_time(&dlspeed->prev_t);
+	}
 	g_free(doneper);
 	gdk_threads_leave();
 	return 0;
@@ -451,8 +463,19 @@ static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *p)
 	gchar *doneper;
 	doneper = g_strdup_printf("%.2f%%", done*100);
 	gtk_list_store_set(GTK_LIST_STORE(pending_store), &current_pending, 1, doneper, 2, done2, -1);
-	doneper = g_strdup_printf("%.2f%% (%s)", done*100, g_format_size_for_display(file->transfered));
-	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
+	GTimeVal now;
+	g_get_current_time(&now);
+	double now_us = (double)(now.tv_sec + now.tv_usec/10E5);
+	double prev_us = (double)(file->prev_t.tv_sec + file->prev_t.tv_usec/10E5);
+	double speed;
+	if (now_us - prev_us > 0.1) {
+		speed = (file->transfered - file->prev_s)/(now_us - prev_us);
+		doneper = g_strdup_printf("%s (%s/s)", g_format_size_for_display(file->transfered), g_format_size_for_display(speed));
+		gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
+		
+		file->prev_s = file->transfered;
+		g_get_current_time(&file->prev_t);
+	}
 	g_free(doneper);
 	gdk_threads_leave();
 	return retcode;
@@ -461,6 +484,9 @@ static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *p)
 static void *download_file(gpointer p)
 {
 	struct transfer *dl = (struct transfer *)p;
+	struct rate dlspeed;
+	dlspeed.prev_s = 0.0;
+	g_get_current_time(&dlspeed.prev_t);
 	gchar *dlto = g_strdup(dl->to);
 	gchar *dlfrom = g_strdup(dl->from);
 	if (curl) {
@@ -476,7 +502,7 @@ static void *download_file(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
 		curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
 		curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, download_progress);
-		curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
+		curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, &dlspeed);
 		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
 		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
@@ -485,10 +511,17 @@ static void *download_file(gpointer p)
 		fclose(fp);
 	}
 	gdk_threads_enter();
-	if (!to_abort && dlto)
-		if (!document_open_file(dlto, FALSE, NULL, NULL))
-			if (dialogs_show_question("Could not open the file in Geany. View it in file browser?"))
-				open_external(g_path_get_dirname(dlto));
+	if (!to_abort) {
+		double val;
+		curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &val);
+		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Total download time: %0.3f s.", val));
+		curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD, &val);
+		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Average download speed: %s/s.", g_format_size_for_display(val)));
+		if (dlto)
+			if (!document_open_file(dlto, FALSE, NULL, NULL))
+				if (dialogs_show_question("Could not open the file in Geany. View it in file browser?"))
+					open_external(g_path_get_dirname(dlto));
+	}
 	gtk_widget_hide(geany->main_widgets->progressbar);
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
 	g_free(dlto);
@@ -505,6 +538,7 @@ static void *upload_file(gpointer p)
 	gchar *ulto = g_strdup(ul->to);
 	gchar *ulfrom = g_strdup(ul->from);
 	struct uploadf file;
+	g_get_current_time(&file.prev_t);
 	if (curl) {
 		file.transfered=0;
 		file.fp=fopen(ulfrom,"rb");
@@ -529,6 +563,13 @@ static void *upload_file(gpointer p)
 		fclose(file.fp);
 	}
 	gdk_threads_enter();
+	if (!to_abort) {
+		double val;
+		curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &val);
+		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Total upload time: %0.3f s.", val));
+		curl_easy_getinfo(curl, CURLINFO_SPEED_UPLOAD, &val);
+		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Average upload speed: %s/s.", g_format_size_for_display(val)));
+	}
 	gtk_widget_hide(geany->main_widgets->progressbar);
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
 	g_free(ulto);
@@ -787,6 +828,12 @@ static void execute()
 	g_free(local);
 }
 
+static gboolean execute_wait(gpointer data)
+{
+	execute();
+	return FALSE;
+}
+
 static void execute_end(gint type)
 {
 	gboolean delete = FALSE;
@@ -807,7 +854,7 @@ static void execute_end(gint type)
 	}
 	running = FALSE;
 	if (!to_abort && gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pending_store), &current_pending)) {
-		execute();
+		g_timeout_add(200, (GSourceFunc)execute_wait, NULL);
 	}
 }
 
