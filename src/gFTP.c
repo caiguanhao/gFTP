@@ -482,6 +482,42 @@ static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *p)
 	return retcode;
 }
 
+static gboolean port_config(gchar *str_port)
+{
+	gint64 port = g_ascii_strtoll(str_port, NULL, 0);
+	if (port<=0 || port>65535) port=21;
+	return port;
+}
+
+static gboolean proxy_config()
+{
+	if (current_settings.current_proxy>0) {
+		gchar *name;
+		gchar **nameparts;
+		name = g_strdup(current_settings.proxy_profiles[current_settings.current_proxy-1]);
+		nameparts = parse_proxy_string(name);
+		if (g_strv_length(nameparts)==4) {
+			switch (to_proxy_type(nameparts[1])) {
+				case 0:
+					curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_HTTP);
+					break;
+				case 1:
+					curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS4);
+					break;
+				case 2:
+					curl_easy_setopt(curl, CURLOPT_PROXYTYPE, CURLPROXY_SOCKS5);
+					break;
+				default:
+					return FALSE;
+			}
+			curl_easy_setopt(curl, CURLOPT_PROXY, nameparts[2]);
+			curl_easy_setopt(curl, CURLOPT_PROXYPORT, port_config(nameparts[3]));
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
 static void *download_file(gpointer p)
 {
 	struct transfer *dl = (struct transfer *)p;
@@ -494,10 +530,9 @@ static void *download_file(gpointer p)
 		FILE *fp;
 		fp=fopen(dlto,"wb");
 		dlfrom = g_strconcat(current_profile.url, dlfrom, NULL);
-		gint64 port = g_ascii_strtoll(current_profile.port, NULL, 0);
-		if (port<=0 || port>65535) port=21;
 		curl_easy_setopt(curl, CURLOPT_URL, dlfrom);
-		curl_easy_setopt(curl, CURLOPT_PORT, port);
+		curl_easy_setopt(curl, CURLOPT_PORT, port_config(current_profile.port));
+		proxy_config();
 		curl_easy_setopt(curl, CURLOPT_USERNAME, current_profile.login);
 		curl_easy_setopt(curl, CURLOPT_PASSWORD, current_profile.password);
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
@@ -547,10 +582,9 @@ static void *upload_file(gpointer p)
 		file.filesize = ftell(file.fp);
 		fseek(file.fp, 0L, SEEK_SET);
 		ulto = g_strconcat(current_profile.url, ulto, NULL);
-		gint64 port = g_ascii_strtoll(current_profile.port, NULL, 0);
-		if (port<=0 || port>65535) port=21;
 		curl_easy_setopt(curl, CURLOPT_URL, ulto);
-		curl_easy_setopt(curl, CURLOPT_PORT, port);
+		curl_easy_setopt(curl, CURLOPT_PORT, port_config(current_profile.port));
+		proxy_config();
 		curl_easy_setopt(curl, CURLOPT_USERNAME, current_profile.login);
 		curl_easy_setopt(curl, CURLOPT_PASSWORD, current_profile.password);
 		curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
@@ -586,10 +620,9 @@ static void *create_file(gpointer p)
 	gchar *ulto = (gchar *)p;
 	if (curl) {
 		ulto = g_strconcat(current_profile.url, ulto, NULL);
-		gint64 port = g_ascii_strtoll(current_profile.port, NULL, 0);
-		if (port<=0 || port>65535) port=21;
 		curl_easy_setopt(curl, CURLOPT_URL, ulto);
-		curl_easy_setopt(curl, CURLOPT_PORT, port);
+		curl_easy_setopt(curl, CURLOPT_PORT, port_config(current_profile.port));
+		proxy_config();
 		curl_easy_setopt(curl, CURLOPT_USERNAME, current_profile.login);
 		curl_easy_setopt(curl, CURLOPT_PASSWORD, current_profile.password);
 		curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
@@ -627,10 +660,9 @@ static void *get_dir_listing(gpointer p)
 	str.ptr = malloc(1);
 	str.ptr[0] = '\0';
 	if (curl) {
-		gint64 port = g_ascii_strtoll(current_profile.port, NULL, 0);
-		if (port<=0 || port>65535) port=21;
 		curl_easy_setopt(curl, CURLOPT_URL, url);
-		curl_easy_setopt(curl, CURLOPT_PORT, port);
+		curl_easy_setopt(curl, CURLOPT_PORT, port_config(current_profile.port));
+		proxy_config();
 		curl_easy_setopt(curl, CURLOPT_USERNAME, current_profile.login);
 		curl_easy_setopt(curl, CURLOPT_PASSWORD, current_profile.password);
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_function);
@@ -649,7 +681,7 @@ static void *get_dir_listing(gpointer p)
 		clear_children();
 		if (to_list(str.ptr)==0) {
 			gdk_threads_enter();
-			gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_DISCONNECT);
+			gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(toolbar.connect), GTK_STOCK_DISCONNECT);
 			if (auto_scroll) fileview_scroll_to_iter(&parent);
 			gdk_threads_leave();
 		}
@@ -674,10 +706,9 @@ static void *send_command(gpointer p)
 	const char *url = g_strconcat(current_profile.url, comms[0], NULL);
 	struct curl_slist *headers = NULL;
 	if (curl) {
-		gint64 port = g_ascii_strtoll(current_profile.port, NULL, 0);
-		if (port<=0 || port>65535) port=21;
 		curl_easy_setopt(curl, CURLOPT_URL, url);
-		curl_easy_setopt(curl, CURLOPT_PORT, port);
+		curl_easy_setopt(curl, CURLOPT_PORT, port_config(current_profile.port));
+		proxy_config();
 		curl_easy_setopt(curl, CURLOPT_USERNAME, current_profile.login);
 		curl_easy_setopt(curl, CURLOPT_PASSWORD, current_profile.password);
 		curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, normal_progress);
@@ -859,16 +890,24 @@ static void execute_end(gint type)
 	}
 }
 
-static void menu_position_func(GtkMenu *menu, gint *x, gint *y, gboolean *push_in, gpointer user_data)
+static void menu_position_func(GtkMenu *menu, gint *x, gint *y, gboolean *push_in, gpointer p)
 {
+	GtkWidget *widget = p;
 	GdkWindow *gdk_window;
 	GtkAllocation allocation;
-	gdk_window = gtk_widget_get_window(btn_connect);
+	gdk_window = gtk_widget_get_window(widget);
 	gdk_window_get_origin(gdk_window, x, y);
-	gtk_widget_get_allocation(btn_connect, &allocation);
+	gtk_widget_get_allocation(widget, &allocation);
 	*x += allocation.x;
 	*y += allocation.y + allocation.height;
 	*push_in = FALSE;
+}
+
+static void to_use_proxy(GtkMenuItem *menuitem, int p)
+{
+	if (gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(menuitem))) {
+		current_settings.current_proxy = p;
+	}
 }
 
 static void to_connect(GtkMenuItem *menuitem, int p)
@@ -910,7 +949,7 @@ static void to_connect(GtkMenuItem *menuitem, int p)
 static void *disconnect(gpointer p)
 {
 	to_abort = TRUE;
-	gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(btn_connect), GTK_STOCK_CONNECT);
+	gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(toolbar.connect), GTK_STOCK_CONNECT);
 	if (curl) {
 		log_new_str(COLOR_RED, "Disconnected.");
 		curl = NULL;
@@ -1262,6 +1301,33 @@ static void save_settings()
 	
 	g_key_file_set_boolean(config, "gFTP-main", "show_hidden_files", current_settings.showhiddenfiles);
 	
+	GtkTreeModel *model;
+	model = gtk_combo_box_get_model(GTK_COMBO_BOX(pref.proxy_combo));
+	if (model) {
+		g_key_file_remove_group(config, "gFTP-proxy", NULL);
+		GtkTreeIter iter;
+		gboolean valid;
+		valid = gtk_tree_model_get_iter_from_string(model, &iter, "2");
+		gchar *name = NULL;
+		gchar *uid = NULL;
+		gchar **nameparts;
+		while (valid) {
+			gtk_tree_model_get(GTK_TREE_MODEL(pref.proxy_store), &iter, 
+			0, &name, 
+			-1);
+			name = g_strstrip(name);
+			uid = g_compute_checksum_for_string(G_CHECKSUM_MD5, name, g_utf8_strlen(name, -1));
+			uid = g_strconcat("proxy_", uid, NULL);
+			nameparts = parse_proxy_string(name);
+			if (g_strv_length(nameparts)==4) {
+				g_key_file_set_string(config, "gFTP-proxy", uid, name);
+			}
+			g_strfreev(nameparts);
+			g_free(name);
+			g_free(uid);
+			valid = gtk_tree_model_iter_next(model, &iter);
+		}
+	}
 	if (g_mkdir_with_parents(config_dir, 0777) == 0) {
 		data = g_key_file_to_data(config, NULL, NULL);
 		utils_write_file(config_file, data);
@@ -1305,12 +1371,47 @@ static void load_hosts()
 	g_key_file_free(hosts);
 }
 
-static void load_settings(void)
+static void load_settings(gint type)
 {
 	GKeyFile *settings = g_key_file_new();
 	config_file = g_strconcat(geany->app->configdir, G_DIR_SEPARATOR_S, "plugins", G_DIR_SEPARATOR_S, "gFTP", G_DIR_SEPARATOR_S, "settings.conf", NULL);
 	g_key_file_load_from_file(settings, config_file, G_KEY_FILE_NONE, NULL);
 	current_settings.showhiddenfiles = utils_get_setting_boolean(settings, "gFTP-main", "show_hidden_files", FALSE);
+	if (!current_settings.current_proxy)
+		current_settings.current_proxy = utils_get_setting_integer(settings, "gFTP-main", "proxy", 0);
+	current_settings.proxy_profiles = g_key_file_get_keys(settings, "gFTP-proxy", NULL, NULL);
+	switch (type) {
+		case 1:{
+			GtkTreeIter iter;
+			gsize i;
+			gchar *name;
+			gchar **nameparts;
+			for (i=0; i<g_strv_length(current_settings.proxy_profiles); i++)  {
+				name = utils_get_setting_string(settings, "gFTP-proxy", current_settings.proxy_profiles[i], "");
+				if (g_utf8_strlen(name, -1)>0) {
+					nameparts = parse_proxy_string(name);
+					if (g_strv_length(nameparts)==4) {
+						gtk_list_store_append(GTK_LIST_STORE(pref.proxy_store), &iter);
+						gtk_list_store_set(GTK_LIST_STORE(pref.proxy_store), &iter, 
+						0, name, 
+						1, nameparts[1], 
+						2, nameparts[2], 
+						3, nameparts[3], 
+						-1);
+					}
+					g_strfreev(nameparts);
+				}
+				g_free(name);
+			}
+			break;
+		}
+		case 2: {
+			gint i;
+			for (i=0; i<g_strv_length(current_settings.proxy_profiles); i++) 
+				current_settings.proxy_profiles[i] = utils_get_setting_string(settings, "gFTP-proxy", current_settings.proxy_profiles[i], "");
+			break;
+		}
+	}
 	g_key_file_free(settings);
 	
 	load_profiles(0);
@@ -1354,6 +1455,11 @@ static gboolean is_edit_profiles_selected_nth_item(GtkTreeIter *iter, char *num)
 	return gtk_tree_path_compare(gtk_tree_path_new_from_string(gtk_tree_model_get_string_from_iter(GTK_TREE_MODEL(pref.store), iter)), gtk_tree_path_new_from_string(num))==0;
 }
 
+static gboolean is_edit_profiles_selected_nth_item_proxy(GtkTreeIter *iter, char *num)
+{
+	return gtk_tree_path_compare(gtk_tree_path_new_from_string(gtk_tree_model_get_string_from_iter(GTK_TREE_MODEL(pref.proxy_store), iter)), gtk_tree_path_new_from_string(num))==0;
+}
+
 static void is_select_profiles_use_anonymous(GtkTreeIter *iter)
 {
 	gboolean toggle = FALSE;
@@ -1376,6 +1482,32 @@ static void is_select_profiles_use_anonymous(GtkTreeIter *iter)
 static void check_delete_button_sensitive(GtkTreeIter *iter)
 {
 	gtk_widget_set_sensitive(pref.delete, !is_edit_profiles_selected_nth_item(iter, "0"));
+}
+
+static void check_delete_button_sensitive_proxy(GtkTreeIter *iter)
+{
+	gtk_widget_set_sensitive(pref.proxy_delete, !is_edit_profiles_selected_nth_item_proxy(iter, "0"));
+}
+
+static int to_proxy_type(gchar *type)
+{
+	if (g_strcmp0(type, "HTTP")==0) return 0;
+	if (g_strcmp0(type, "SOCKS4")==0) return 1;
+	if (g_strcmp0(type, "SOCKS5")==0) return 2;
+	return -1;
+}
+
+static gchar **parse_proxy_string(gchar *name)
+{
+	gchar **results;
+	GRegex *regex;
+	GMatchInfo *match_info;
+	regex = g_regex_new("^(HTTP|SOCKS4|SOCKS5),\\s(.*):(.*)$", 0, 0, NULL);
+	g_regex_match(regex, name, 0, &match_info);
+	results = g_match_info_fetch_all(match_info);
+	g_match_info_free(match_info);
+	g_regex_unref(regex);
+	return results;
 }
 
 static gchar *run_file_chooser(const gchar *title, GtkFileChooserAction action, const gchar *utf8_path)
@@ -1415,7 +1547,9 @@ static gchar *return_web_url(gchar *name, gboolean is_dir)
 	url = g_strdup(current_profile.webhost);
 	prefix = g_strdup(current_profile.prefix);
 	
-	if (!g_regex_match_simple("^https?://", url, G_REGEX_CASELESS, 0)) 
+	if (g_utf8_strlen(url, -1)==0)
+		url = g_strdup(current_profile.url);
+	else if (!g_regex_match_simple("^https?://", url, G_REGEX_CASELESS, 0)) 
 		url = g_strconcat("http://", url, NULL);
 	
 	if (!g_str_has_suffix(url, "/")) 
@@ -1619,12 +1753,40 @@ static void on_connect_clicked(gpointer p)
 				gtk_container_add(GTK_CONTAINER(menu), item);
 				g_signal_connect(item, "activate", G_CALLBACK(to_connect), (gpointer)i);
 			}
-			gtk_menu_popup(GTK_MENU(menu), NULL, NULL, (GtkMenuPositionFunc)menu_position_func, NULL, 0, GDK_CURRENT_TIME);
+			gtk_menu_popup(GTK_MENU(menu), NULL, NULL, (GtkMenuPositionFunc)menu_position_func, toolbar.connect, 0, GDK_CURRENT_TIME);
 		} else {
-			on_edit_preferences();
+			on_edit_preferences(NULL, 1);
 		}
 	} else {
 		disconnect(NULL);
+	}
+}
+
+static void on_proxy_profiles_clicked(gpointer p)
+{
+	load_settings(2);
+	GSList *group = NULL;
+	gint length = g_strv_length(current_settings.proxy_profiles);
+	gint i;
+	if (length>0) {
+		GtkWidget *item, *menu;
+		menu = gtk_menu_new();
+		item = gtk_radio_menu_item_new_with_label(group, "No Proxy");
+		gtk_widget_show(item);
+		gtk_container_add(GTK_CONTAINER(menu), item);
+		gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), (current_settings.current_proxy==0));
+		g_signal_connect(item, "activate", G_CALLBACK(to_use_proxy), (gpointer)0);
+		for (i = 0; i < length; i++) {
+			group = gtk_radio_menu_item_get_group(GTK_RADIO_MENU_ITEM(item));
+			item = gtk_radio_menu_item_new_with_label(group, current_settings.proxy_profiles[i]);
+			gtk_widget_show(item);
+			gtk_container_add(GTK_CONTAINER(menu), item);
+			gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), (current_settings.current_proxy==i+1));
+			g_signal_connect(item, "activate", G_CALLBACK(to_use_proxy), (gpointer)i+1);
+		}
+		gtk_menu_popup(GTK_MENU(menu), NULL, NULL, (GtkMenuPositionFunc)menu_position_func, toolbar.proxy, 0, GDK_CURRENT_TIME);
+	} else {
+		on_edit_preferences(NULL, 2);
 	}
 }
 
@@ -1651,8 +1813,9 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
 	return FALSE;
 }
 
-static void on_edit_preferences(void)
+static void on_edit_preferences(GtkToolButton *toolbutton, gint page_num)
 {
+	if (page_num>0) config_page_number = page_num - 1;
 	plugin_show_configure(geany_plugin);
 }
 
@@ -1687,6 +1850,33 @@ static void *on_host_login_password_changed(GtkWidget *widget, GdkEventKey *even
 		-1);
 		gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &pref.iter_store_new);
 	//}
+	return FALSE;
+}
+
+static void *on_proxy_profile_entry_changed(GtkWidget *widget, GdkEventKey *event, GtkDialog *dialog)
+{
+	gchar *type = g_strdup(gtk_combo_box_get_active_text(GTK_COMBO_BOX(pref.proxy_type)));
+	gchar *host = g_strdup(gtk_entry_get_text(GTK_ENTRY(pref.proxy_host)));
+	gchar *port = g_strdup(gtk_entry_get_text(GTK_ENTRY(pref.proxy_port)));
+	gchar *name = g_strdup(type);
+	if (gtk_combo_box_get_active(GTK_COMBO_BOX(pref.proxy_type))>-1) {
+		if (g_utf8_strlen(host, -1)>0) name = g_strconcat(name, ", ", host, NULL);
+		if (g_utf8_strlen(port, -1)>0) name = g_strconcat(name, ":", port, NULL);
+		if (!gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.proxy_store), &pref.proxy_iter_store_new) || is_edit_profiles_selected_nth_item_proxy(&pref.proxy_iter_store_new, "0")) {
+			gtk_list_store_append(GTK_LIST_STORE(pref.proxy_store), &pref.proxy_iter_store_new);
+		}
+		gtk_list_store_set(GTK_LIST_STORE(pref.proxy_store), &pref.proxy_iter_store_new, 
+		0, name, 
+		1, type, 
+		2, host, 
+		3, port, 
+		-1);
+	}
+	g_free(name);
+	g_free(type);
+	g_free(host);
+	g_free(port);
+	gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.proxy_combo), &pref.proxy_iter_store_new);
 	return FALSE;
 }
 
@@ -1808,6 +1998,38 @@ static void on_edit_profiles_changed(void)
 	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pref.showpass), FALSE);
 }
 
+static void on_edit_proxy_profiles_changed(void)
+{
+	GtkTreeIter iter;
+	gtk_combo_box_get_active_iter(GTK_COMBO_BOX(pref.proxy_combo), &iter);
+	gtk_combo_box_get_active_iter(GTK_COMBO_BOX(pref.proxy_combo), &pref.proxy_iter_store_new);
+	gchar *type = g_strdup_printf("%s", "");
+	gchar *host = g_strdup_printf("%s", "");
+	gchar *port = g_strdup_printf("%s", "");
+	if (is_edit_profiles_selected_nth_item_proxy(&iter, "0")) {
+		focus_widget(pref.proxy_host);
+		gtk_combo_box_set_active(GTK_COMBO_BOX(pref.proxy_type), -1);
+	} else {
+		if (gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.proxy_store), &iter)) {
+			gtk_tree_model_get(GTK_TREE_MODEL(pref.proxy_store), &iter, 
+			1, &type, 
+			2, &host, 
+			3, &port, 
+			-1);
+		}
+	}
+	g_signal_handler_block(pref.proxy_type, pref.type_handler_id);
+	gtk_combo_box_set_active(GTK_COMBO_BOX(pref.proxy_type), to_proxy_type(type));
+	g_signal_handler_unblock(pref.proxy_type, pref.type_handler_id);
+	gtk_entry_set_text(GTK_ENTRY(pref.proxy_host), host);
+	gtk_entry_set_text(GTK_ENTRY(pref.proxy_port), port);
+	g_free(type);
+	g_free(host);
+	g_free(port);
+	
+	check_delete_button_sensitive_proxy(&iter);
+}
+
 static void on_delete_profile_clicked()
 {
 	GtkTreeIter iter;
@@ -1817,6 +2039,18 @@ static void on_delete_profile_clicked()
 		int n = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pref.store), NULL);
 		if (n==2) n=1;
 		gtk_combo_box_set_active(GTK_COMBO_BOX(pref.combo), n-1);
+	}
+}
+
+static void on_delete_proxy_profile_clicked()
+{
+	GtkTreeIter iter;
+	gtk_combo_box_get_active_iter(GTK_COMBO_BOX(pref.proxy_combo), &iter);
+	if (!is_edit_profiles_selected_nth_item_proxy(&iter, "0")) {
+		gtk_list_store_remove(GTK_LIST_STORE(pref.proxy_store), &iter);
+		int n = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pref.proxy_store), NULL);
+		if (n==2) n=1;
+		gtk_combo_box_set_active(GTK_COMBO_BOX(pref.proxy_combo), n-1);
 	}
 }
 
@@ -1838,8 +2072,8 @@ static void on_document_save()
 
 static void on_configure_response(GtkDialog *dialog, gint response, gpointer user_data)
 {
-	if (response == GTK_RESPONSE_OK || response == GTK_RESPONSE_APPLY)
-	{
+	config_page_number = gtk_notebook_get_current_page(GTK_NOTEBOOK(pref.notebook));
+	if (response == GTK_RESPONSE_OK || response == GTK_RESPONSE_APPLY) {
 		save_settings();
 		save_profiles(1);
 	}
@@ -1896,6 +2130,11 @@ static gboolean drag_motion (GtkWidget *widget, GdkDragContext *context, gint x,
 static gboolean profiles_treeview_row_is_separator(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
 {
 	return is_edit_profiles_selected_nth_item(iter, "1");
+}
+
+static gboolean profiles_treeview_row_is_separator_proxy(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+{
+	return is_edit_profiles_selected_nth_item_proxy(iter, "1");
 }
 
 static void prepare_file_view()
@@ -2004,23 +2243,31 @@ static gboolean focus_widget(gpointer p)
 
 static GtkWidget *make_toolbar(void)
 {
-	GtkWidget *wid, *toolbar;
+	GtkWidget *widget, *tool_bar;
 	
-	toolbar = gtk_toolbar_new();
-	gtk_toolbar_set_icon_size(GTK_TOOLBAR(toolbar), GTK_ICON_SIZE_MENU);
-	gtk_toolbar_set_style(GTK_TOOLBAR(toolbar), GTK_TOOLBAR_ICONS);
+	tool_bar = gtk_toolbar_new();
+	gtk_toolbar_set_icon_size(GTK_TOOLBAR(tool_bar), GTK_ICON_SIZE_MENU);
+	gtk_toolbar_set_style(GTK_TOOLBAR(tool_bar), GTK_TOOLBAR_ICONS);
 	
-	btn_connect = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_CONNECT));
-	gtk_widget_set_tooltip_text(btn_connect, "Connect / Disconnect");
-	g_signal_connect(btn_connect, "clicked", G_CALLBACK(on_connect_clicked), NULL);
-	gtk_container_add(GTK_CONTAINER(toolbar), btn_connect);
-		
-	wid = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_PREFERENCES));
-	gtk_widget_set_tooltip_text(wid, "Preferences");
-	g_signal_connect(wid, "clicked", G_CALLBACK(on_edit_preferences), NULL);
-	gtk_container_add(GTK_CONTAINER(toolbar), wid);
+	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_CONNECT));
+	gtk_widget_set_tooltip_text(widget, "Connect / Disconnect");
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_connect_clicked), NULL);
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
+	toolbar.connect = widget;
 	
-	return toolbar;
+	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_NETWORK));
+	gtk_widget_set_tooltip_text(widget, "Proxy profiles");
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_proxy_profiles_clicked), NULL);
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
+	toolbar.proxy = widget;
+	
+	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_PREFERENCES));
+	gtk_widget_set_tooltip_text(widget, "Preferences");
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_edit_preferences), (gpointer)0);
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
+	toolbar.preference = widget;
+	
+	return tool_bar;
 }
 
 static void kb_activate(guint key_id)
@@ -2082,7 +2329,7 @@ void plugin_init(GeanyData *data)
 	
 	gtk_box_pack_start(GTK_BOX(box), vpaned, TRUE, TRUE, 0);
 	
-	load_settings();
+	load_settings(2);
 	
 	gtk_widget_show_all(box);
 	page_number = gtk_notebook_append_page(GTK_NOTEBOOK(geany->main_widgets->sidebar_notebook), box, gtk_label_new("FTP"));
@@ -2125,9 +2372,11 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	
 	table = gtk_table_new(12, 4, FALSE);
 	
+	gtk_widget_set_size_request(widget, 250, -1);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
-	widget = gtk_button_new_from_stock(GTK_STOCK_DELETE);
+	widget = gtk_button_new_with_mnemonic("_Delete");
 	gtk_widget_set_tooltip_text(widget, "Delete current profile.");
+	gtk_widget_set_size_request(widget, 90, -1);
 	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "clicked", G_CALLBACK(on_delete_profile_clicked), NULL);
 	pref.delete = widget;
@@ -2138,8 +2387,8 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
 	g_object_set_data(G_OBJECT(widget), "name-edited", (gpointer)FALSE);
-	gtk_widget_set_size_request(widget, 220, -1);
 	gtk_widget_set_tooltip_text(widget, "Profile name for display.");
+	gtk_entry_set_max_length(GTK_ENTRY(widget), 255);
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_name_edited), dialog);
 	pref.name = widget;
@@ -2151,7 +2400,8 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
-	gtk_widget_set_tooltip_text(widget, "FTP hostname.");
+	gtk_widget_set_tooltip_text(widget, "FTP hostname. (required)");
+	gtk_entry_set_max_length(GTK_ENTRY(widget), 255);
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), dialog);
 	pref.host = widget;
@@ -2161,6 +2411,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	widget = gtk_entry_new();
 	gtk_widget_set_tooltip_text(widget, "Default FTP port number is 21.");
 	gtk_widget_set_size_request(widget, 40, -1);
+	gtk_entry_set_max_length(GTK_ENTRY(widget), 5);
 	gtk_entry_set_text(GTK_ENTRY(widget), "21");
 	gtk_table_attach(GTK_TABLE(table), widget, 3, 4, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), dialog);
@@ -2254,7 +2505,73 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_widget_show_all(hbox);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), table, hbox);
 	
+	table = gtk_table_new(2, 5, FALSE);
+	
+	store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+	gtk_list_store_append(store, &iter);
+	gtk_list_store_set(store, &iter, 0, "New proxy profile...", -1);
+	widget = gtk_combo_box_new_with_model(GTK_TREE_MODEL(store));
+	gtk_list_store_append(store, &iter); //for separator
+	pref.proxy_store = store;
+	pref.proxy_combo = widget;
+	g_object_unref(G_OBJECT(store));
+	
+	renderer = gtk_cell_renderer_text_new();
+	gtk_cell_layout_pack_start(GTK_CELL_LAYOUT(widget), renderer, TRUE);
+	gtk_cell_layout_add_attribute(GTK_CELL_LAYOUT(widget), renderer, "text", 0);
+	gtk_combo_box_set_active(GTK_COMBO_BOX(widget), 0);
+	gtk_widget_set_tooltip_text(widget, "Choose a proxy profile to edit or choose New proxy profile to create one.");
+	gtk_combo_box_set_row_separator_func(GTK_COMBO_BOX(widget), (GtkTreeViewRowSeparatorFunc)profiles_treeview_row_is_separator_proxy, NULL, NULL);
+	g_signal_connect(widget, "changed", G_CALLBACK(on_edit_proxy_profiles_changed), NULL);
+	gtk_widget_set_size_request(widget, 250, -1);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 3, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	
+	widget = gtk_button_new_with_mnemonic("_Delete");
+	gtk_widget_set_tooltip_text(widget, "Delete current proxy profile.");
+	gtk_widget_set_size_request(widget, 90, -1);
+	gtk_table_attach(GTK_TABLE(table), widget, 3, 5, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_delete_proxy_profile_clicked), NULL);
+	pref.proxy_delete = widget;
+	check_delete_button_sensitive_proxy(NULL);
+	
+	widget = gtk_combo_box_new_text();
+	gtk_combo_box_append_text(GTK_COMBO_BOX(widget), "HTTP");
+	gtk_combo_box_append_text(GTK_COMBO_BOX(widget), "SOCKS4");
+	gtk_combo_box_append_text(GTK_COMBO_BOX(widget), "SOCKS5");
+	gtk_combo_box_set_active(GTK_COMBO_BOX(widget), 0);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	pref.type_handler_id = g_signal_connect(widget, "changed", G_CALLBACK(on_proxy_profile_entry_changed), dialog);
+	pref.proxy_type = widget;
+	
+	widget = gtk_label_new("Host");
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_widget_set_size_request(widget, 100, -1);
+	gtk_entry_set_max_length(GTK_ENTRY(widget), 255);
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_proxy_profile_entry_changed), dialog);
+	pref.proxy_host = widget;
+	
+	widget = gtk_label_new("Port");
+	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
+	gtk_table_attach(GTK_TABLE(table), widget, 3, 4, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_widget_set_size_request(widget, 40, -1);
+	gtk_entry_set_max_length(GTK_ENTRY(widget), 5);
+	gtk_table_attach(GTK_TABLE(table), widget, 4, 5, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_proxy_profile_entry_changed), dialog);
+	pref.proxy_port = widget;
+	
+	load_settings(1);
+	
+	hbox = gtk_hbox_new(FALSE, 6);
+	widget = gtk_label_new("Proxy");
+	gtk_box_pack_start(GTK_BOX(hbox), widget, FALSE, FALSE, 0);
+	gtk_widget_show_all(hbox);
+	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), table, hbox);
+	
 	gtk_box_pack_start(GTK_BOX(vbox), notebook, FALSE, FALSE, 0);
+	pref.notebook = notebook;
 	
 	gtk_widget_show_all(vbox);
 	
@@ -2262,8 +2579,16 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	
 	if (curl) 
 		select_profile(current_profile.index);
-	else
-		g_timeout_add(100, (GSourceFunc)focus_widget, pref.host);
+	
+	switch (config_page_number) {
+		case 0:
+			if (!curl) g_timeout_add(100, (GSourceFunc)focus_widget, pref.host);
+			break;
+		case 1:
+			if (!curl) g_timeout_add(100, (GSourceFunc)focus_widget, pref.proxy_host);
+			break;
+	}
+	gtk_notebook_set_current_page(GTK_NOTEBOOK(pref.notebook), config_page_number);
 	return vbox;
 }
 

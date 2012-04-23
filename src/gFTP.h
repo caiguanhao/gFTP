@@ -18,7 +18,6 @@ enum
 
 static GtkWidget *box, *fileview_scroll;
 static GtkWidget *file_view, *pending_view;
-static GtkWidget *btn_connect;
 static GtkTreeStore *file_store;
 static GtkListStore *pending_store;
 static GtkTreeIter parent, current_pending;
@@ -29,7 +28,7 @@ static gchar *config_file, *profiles_file, *hosts_file, *tmp_dir;
 static gboolean running = FALSE;
 static gboolean to_abort = FALSE;
 static gboolean adding = FALSE;
-static gint page_number = 0;
+static gint page_number = 0, config_page_number = 0;
 
 #ifndef BASE64ENCODE_TIMES
 #define BASE64ENCODE_TIMES 8
@@ -66,6 +65,13 @@ struct uploadf {
 
 static struct
 {
+	GtkWidget *connect;
+	GtkWidget *proxy;
+	GtkWidget *preference;
+} toolbar;
+
+static struct
+{
 	GtkListStore *store;
 	GtkTreeIter iter_store_new;
 	GtkWidget *combo;
@@ -83,7 +89,18 @@ static struct
 	GtkWidget *local;
 	GtkWidget *webhost;
 	GtkWidget *prefix;
+	
+	GtkListStore *proxy_store;
+	GtkTreeIter proxy_iter_store_new;
+	GtkWidget *proxy_combo;
+	GtkWidget *proxy_delete;
+	GtkWidget *proxy_type;
+	gulong type_handler_id;
+	GtkWidget *proxy_host;
+	GtkWidget *proxy_port;
+	
 	GtkWidget *showhiddenfiles;
+	GtkWidget *notebook;
 } pref;
 
 static struct
@@ -95,6 +112,8 @@ static struct
 static struct 
 {
 	gboolean showhiddenfiles;
+	gint current_proxy;
+	gchar **proxy_profiles;
 } current_settings;
 
 static struct 
@@ -122,7 +141,7 @@ static void *to_get_dir_listing(gpointer p);
 static void load_profiles(gint type);
 static gchar *load_profile_property(gint index, gchar *field);
 static void on_edit_profiles_changed(void);
-static void on_edit_preferences(void);
+static void on_edit_preferences(GtkToolButton *toolbutton, gint page_num);
 static void on_open_clicked(GtkMenuItem *menuitem, gpointer p);
 static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data);
 static gboolean on_retry_entry_keypress(GtkWidget *widget, GdkEventKey *event, gpointer dialog);
@@ -132,5 +151,7 @@ static void on_retry_dialog_response(GtkDialog *dialog, gint response, gpointer 
 static size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream);
 static size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str);
 static gboolean focus_widget(gpointer p);
+static int to_proxy_type(gchar *type);
+static gchar **parse_proxy_string(gchar *name);
 
 #endif
