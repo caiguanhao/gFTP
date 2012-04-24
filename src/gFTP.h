@@ -24,7 +24,7 @@ static GtkTreeIter parent, current_pending;
 static CURL *curl;
 static gchar **all_profiles, **all_hosts;
 static gsize all_profiles_length;
-static gchar *config_file, *profiles_file, *hosts_file, *tmp_dir;
+static gchar *config_file, *profiles_file, *cache_file, *hosts_file, *tmp_dir;
 static gboolean running = FALSE;
 static gboolean to_abort = FALSE;
 static gboolean adding = FALSE;
@@ -47,6 +47,7 @@ struct transfer
 {
 	char *from;
 	char *to;
+	gboolean cache_enabled;
 };
 
 struct rate
@@ -111,6 +112,7 @@ static struct
 
 static struct 
 {
+	gboolean cache;
 	gboolean showhiddenfiles;
 	gint current_proxy;
 	gchar **proxy_profiles;
@@ -153,5 +155,6 @@ static size_t write_function(void *ptr, size_t size, size_t nmemb, struct string
 static gboolean focus_widget(gpointer p);
 static int to_proxy_type(gchar *type);
 static gchar **parse_proxy_string(gchar *name);
+static gchar *encrypt(gchar *src);
 
 #endif
