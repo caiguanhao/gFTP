@@ -90,6 +90,7 @@ static struct
 	GtkWidget *local;
 	GtkWidget *webhost;
 	GtkWidget *prefix;
+	GtkWidget *p_view;
 	
 	GtkListStore *proxy_store;
 	GtkTreeIter proxy_iter_store_new;

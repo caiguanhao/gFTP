@@ -27,7 +27,6 @@ static void try_another_username_password()
 		"_Retry", 1, 
 		NULL);
 	vbox = ui_dialog_vbox_new(GTK_DIALOG(dialog));
-	gtk_widget_set_name(dialog, "GeanyDialog");
 	gtk_box_set_spacing(GTK_BOX(vbox), 6);
 	
 	GtkWidget *widget, *table;
@@ -1601,6 +1600,11 @@ static gchar **parse_proxy_string(gchar *name)
 	return results;
 }
 
+static gboolean show_only_profiles(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
+{
+	return !(is_edit_profiles_selected_nth_item(iter, "0") || is_edit_profiles_selected_nth_item(iter, "1"));
+}
+
 static gchar *run_file_chooser(const gchar *title, GtkFileChooserAction action, const gchar *utf8_path)
 { //FROM GEANY SOURCE (ui_utils.c)
 	GtkWidget *dialog = gtk_file_chooser_dialog_new(title, GTK_WINDOW(geany->main_widgets->window), action, GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL, GTK_STOCK_OPEN, GTK_RESPONSE_OK, NULL);
@@ -1647,7 +1651,7 @@ static gchar *return_web_url(gchar *name, gboolean is_dir)
 		url = g_strconcat(url, "/", NULL);
 	
 	rel = g_file_get_relative_path(g_file_new_for_path(prefix), g_file_new_for_path(name));
-	
+	if (!rel) rel = g_file_get_relative_path(g_file_new_for_path(prefix), g_file_new_for_path(g_strconcat("/", name, NULL)));
 	if (!rel) {
 		g_return_val_if_fail(dialogs_show_question("You have an invalid prefix or are viewing outside prefix. You may check your profile settings. Continue with the maybe invalid URL?"), NULL);
 		rel = g_strdup(name);
@@ -2132,15 +2136,235 @@ static void on_edit_proxy_profiles_changed(void)
 	check_delete_button_sensitive_proxy(&iter);
 }
 
+static gchar* new_names(gchar *name)
+{
+	gchar *oname = g_strdup(name);
+	oname = g_strstrip(oname);
+	
+	GRegex *regex;
+	GMatchInfo *match_info;
+	regex = g_regex_new("^(.*)\\s\\(\\d+\\)$", 0, 0, NULL);
+	g_regex_match(regex, oname, 0, &match_info);
+	if (g_match_info_matches(match_info)) {
+		oname = g_match_info_fetch(match_info, 1);
+	}
+	g_match_info_free(match_info);
+	g_regex_unref(regex);
+	
+	gchar *names = NULL;
+	GSList *nums = NULL;
+	gint num;
+	for (num=100; num>0; num--)
+		nums = g_slist_prepend(nums, (gpointer)num);
+	
+	gchar *pname;
+	pname = g_regex_escape_string(oname, -1);
+	pname = g_strdup_printf("^%s\\s\\((\\d+)\\)$", pname);
+	regex = g_regex_new(pname, 0, 0, NULL);
+	
+	GtkTreeIter iter;
+	gboolean valid = gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter, "2");
+	
+	while (valid) {
+		gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 0, &names, -1);
+		names = g_strstrip(names);
+		g_regex_match(regex, names, 0, &match_info);
+		if (g_match_info_matches(match_info)) {
+			num = g_ascii_strtoll(g_match_info_fetch(match_info, 1), NULL, 0);
+			nums = g_slist_remove_all(nums, (gpointer)num);
+		}
+		g_free(names);
+		valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(pref.store), &iter);
+	}
+	
+	for (num=1; num<g_slist_length(nums); num++) {
+		oname = g_strdup_printf("%s (%d)", oname, (gint)g_slist_nth_data(nums, num));
+		break;
+	}
+	g_match_info_free(match_info);
+	g_regex_unref(regex);
+	g_slist_free(nums);
+	g_free(pname);
+	return oname;
+}
+
+static void on_profile_organize_clicked(GtkToolButton *toolbutton, gpointer p)
+{
+	GtkTreePath *path;
+	gtk_tree_view_get_cursor(GTK_TREE_VIEW(pref.p_view), &path, NULL);
+	gtk_tree_path_next(path);
+	gtk_tree_path_next(path);
+	GtkTreeIter iter;
+	GtkTreeIter iter2;
+	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter, gtk_tree_path_to_string(path));
+	switch ((int)p) {
+		case 1:
+			gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter2, "2");
+			gtk_list_store_move_before(GTK_LIST_STORE(pref.store), &iter, &iter2);
+			break;
+		case 2:
+			if (g_strcmp0(gtk_tree_path_to_string(path),"2")!=0 && gtk_tree_path_prev(path)) {
+				gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter2, gtk_tree_path_to_string(path));
+				gtk_list_store_move_before(GTK_LIST_STORE(pref.store), &iter, &iter2);
+			}
+			break;
+		case 3:
+			gtk_tree_path_next(path);
+			gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter2, gtk_tree_path_to_string(path));
+			gtk_list_store_move_after(GTK_LIST_STORE(pref.store), &iter, &iter2);
+			break;
+		case 4:
+			gtk_list_store_move_before(GTK_LIST_STORE(pref.store), &iter, NULL);
+			break;
+		case 5: {
+				GtkTreeIter iter_new;
+				gtk_list_store_insert_after(pref.store, &iter_new, &iter);
+				gchar *name;
+				gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 0, &name, -1);
+				gtk_list_store_set(pref.store, &iter_new, 0, new_names(name), -1);
+				g_free(name);
+				gint i;
+				GValue val = {0};
+				for (i=1; i<gtk_tree_model_get_n_columns(GTK_TREE_MODEL(pref.store)); i++) {
+					g_value_init(&val, gtk_tree_model_get_column_type(GTK_TREE_MODEL(pref.store), i+1));
+					gtk_tree_model_get_value(GTK_TREE_MODEL(pref.store), &iter, i, &val);
+					gtk_list_store_set_value(pref.store, &iter_new, i, &val);
+					g_value_unset(&val);
+				}
+				gtk_tree_path_prev(path); //because first 2 rows are hidden in p_view
+				gtk_tree_view_set_cursor(GTK_TREE_VIEW(pref.p_view), path, NULL, FALSE);
+			}
+			break;
+		case 6:
+			gtk_list_store_remove(GTK_LIST_STORE(pref.store), &iter);
+			int n = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pref.store), NULL) - 2;
+			if (n<=0) {
+				gtk_combo_box_set_active(GTK_COMBO_BOX(pref.combo), 0);
+			} else {
+				gtk_tree_path_prev(path);
+				gtk_tree_path_prev(path);
+				gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter, gtk_tree_path_to_string(path));
+				gtk_tree_model_iter_next(GTK_TREE_MODEL(pref.store), &iter);
+				if (!gtk_tree_model_iter_next(GTK_TREE_MODEL(pref.store), &iter))
+					path = gtk_tree_path_new_from_string(g_strdup_printf("%d", n-1));
+				gtk_tree_view_set_cursor(GTK_TREE_VIEW(pref.p_view), path, NULL, FALSE);
+				
+			}
+			break;
+		case 99:
+			gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
+			on_edit_profiles_changed();
+			break;
+	}
+}
+
+static void on_organize_profile_clicked(GtkButton *button, gpointer p)
+{
+	GtkWidget *dialog, *vbox, *widget, *tool_bar;
+	dialog = gtk_dialog_new_with_buttons("Organize Profiles", GTK_WINDOW(p),
+		GTK_DIALOG_DESTROY_WITH_PARENT, 
+		GTK_STOCK_CLOSE, GTK_RESPONSE_CLOSE, 
+		NULL);
+	vbox = ui_dialog_vbox_new(GTK_DIALOG(dialog));
+	GdkPixbuf *pb = gtk_window_get_icon(GTK_WINDOW(geany->main_widgets->window));
+	gtk_window_set_icon(GTK_WINDOW(dialog), pb);
+	
+	gtk_box_set_spacing(GTK_BOX(vbox), 6);
+	
+	tool_bar = gtk_toolbar_new();
+	gtk_toolbar_set_icon_size(GTK_TOOLBAR(tool_bar), GTK_ICON_SIZE_LARGE_TOOLBAR);
+	gtk_toolbar_set_style(GTK_TOOLBAR(tool_bar), GTK_TOOLBAR_ICONS);
+	
+	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_GOTO_TOP));
+	gtk_widget_set_tooltip_text(widget, "Move selected profile to the top.");
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_profile_organize_clicked), (gpointer)1);
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
+	
+	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_GO_UP));
+	gtk_widget_set_tooltip_text(widget, "Move selected profile up.");
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_profile_organize_clicked), (gpointer)2);
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
+	
+	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_GO_DOWN));
+	gtk_widget_set_tooltip_text(widget, "Move selected profile down.");
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_profile_organize_clicked), (gpointer)3);
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
+	
+	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_GOTO_BOTTOM));
+	gtk_widget_set_tooltip_text(widget, "Move selected profile to the bottom.");
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_profile_organize_clicked), (gpointer)4);
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
+	
+	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_COPY));
+	gtk_widget_set_tooltip_text(widget, "Make a copy of selected profile.");
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_profile_organize_clicked), (gpointer)5);
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
+	
+	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_DELETE));
+	gtk_widget_set_tooltip_text(widget, "Delete selected profile.");
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_profile_organize_clicked), (gpointer)6);
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
+	
+	gtk_box_pack_start(GTK_BOX(vbox), tool_bar, FALSE, FALSE, 0);
+	
+	GtkTreeModel *filter;
+	filter = gtk_tree_model_filter_new(GTK_TREE_MODEL(pref.store), NULL);
+	gtk_tree_model_filter_set_visible_func(GTK_TREE_MODEL_FILTER(filter), (GtkTreeModelFilterVisibleFunc)show_only_profiles, NULL, NULL);
+	widget = gtk_tree_view_new_with_model(GTK_TREE_MODEL(filter));
+	
+	GtkCellRenderer *text_renderer;
+	GtkTreeViewColumn *column;
+	column = gtk_tree_view_column_new();
+	text_renderer = gtk_cell_renderer_text_new();
+	gtk_tree_view_column_pack_start(column, text_renderer, TRUE);
+	gtk_tree_view_column_set_attributes(column, text_renderer, "text", 0, NULL);
+	gtk_tree_view_append_column(GTK_TREE_VIEW(widget), column);
+	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(widget), FALSE);
+	gtk_tree_view_set_tooltip_column(GTK_TREE_VIEW(widget), 0);
+	
+	GtkTreeIter iter;
+	gtk_combo_box_get_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
+	GtkTreePath *path;
+	path = gtk_tree_path_new_from_string(gtk_tree_model_get_string_from_iter(GTK_TREE_MODEL(pref.store), &iter));
+	if (gtk_tree_path_prev(path))
+		if (gtk_tree_path_prev(path))
+			gtk_tree_view_set_cursor(GTK_TREE_VIEW(widget), path, NULL, FALSE);
+	g_signal_connect(widget, "cursor-changed", G_CALLBACK(on_profile_organize_clicked), (gpointer)99);
+	pref.p_view = widget;
+	
+	widget = gtk_scrolled_window_new(NULL, NULL);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(widget),	GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+	gtk_container_add(GTK_CONTAINER(widget), pref.p_view);
+	gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(widget), pref.p_view);
+	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(widget), GTK_SHADOW_IN);
+	gtk_widget_set_size_request(widget, 250, 300);
+	
+	gtk_box_pack_start(GTK_BOX(vbox), widget, TRUE, TRUE, 0);
+	
+	gtk_widget_show_all(dialog);
+	
+	gint w, x, y;
+	gtk_window_get_position(GTK_WINDOW(p), &x, &y);
+	gtk_window_get_size(GTK_WINDOW(dialog), &w, NULL);
+	gtk_window_move(GTK_WINDOW(dialog), x-w, y);
+	
+	gtk_dialog_run(GTK_DIALOG(dialog));
+	gtk_widget_destroy(dialog);
+}
+
 static void on_delete_profile_clicked()
 {
 	GtkTreeIter iter;
 	gtk_combo_box_get_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
 	if (!is_edit_profiles_selected_nth_item(&iter, "0")) {
 		gtk_list_store_remove(GTK_LIST_STORE(pref.store), &iter);
-		int n = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pref.store), NULL);
-		if (n==2) n=1;
-		gtk_combo_box_set_active(GTK_COMBO_BOX(pref.combo), n-1);
+		if (gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.store), &iter)) {
+			gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &iter);
+		} else {
+			int n = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pref.store), NULL);
+			if (n==2) n=1;
+			gtk_combo_box_set_active(GTK_COMBO_BOX(pref.combo), n-1);
+		}
 	}
 }
 
@@ -2496,6 +2720,10 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_name_edited), dialog);
 	pref.name = widget;
+	widget = gtk_button_new_with_mnemonic("_Organize...");
+	gtk_widget_set_tooltip_text(widget, "Organize profiles.");
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 4, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_organize_profile_clicked), dialog);
 	
 	widget = gtk_hseparator_new();
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 4, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 4);
