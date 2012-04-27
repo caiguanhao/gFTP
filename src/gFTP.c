@@ -16,7 +16,7 @@ PLUGIN_SET_INFO("gFTP", "FTP Plugin for Geany.", "1.0", "Cai Guanhao <caiguanhao
 
 PLUGIN_KEY_GROUP(gFTP, KB_COUNT)
 
-static void try_another_username_password()
+static void try_another_username_password(gchar *raw)
 {
 	gdk_threads_enter();
 	GtkWidget *dialog, *vbox;
@@ -31,34 +31,44 @@ static void try_another_username_password()
 	
 	GtkWidget *widget, *table;
 	
-	table = gtk_table_new(3, 3, FALSE);
+	table = gtk_table_new(5, 3, FALSE);
 	
-	widget = gtk_label_new("Wrong Username or Password");
+	widget = gtk_label_new("<b>Wrong Username or Password</b>");
+	gtk_label_set_use_markup(GTK_LABEL(widget), TRUE);
 	gtk_misc_set_alignment(GTK_MISC(widget), 0.5, 0.5);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 3, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_hseparator_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 3, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 4);
+	widget = gtk_label_new("Message");
+	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_label_new(raw);
+	gtk_misc_set_alignment(GTK_MISC(widget), 0, 0);
+	gtk_label_set_line_wrap(GTK_LABEL(widget), TRUE);
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 3, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_label_new("Login");
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
-	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
 	gtk_entry_set_text(GTK_ENTRY(widget), current_profile.login);
-	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-press-event", G_CALLBACK(on_retry_entry_keypress), dialog);
 	retry.login = widget;
 	widget = gtk_check_button_new_with_label("Anonymous");
-	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "toggled", G_CALLBACK(on_retry_use_anonymous_toggled), NULL);
 	
 	widget = gtk_label_new("Password");
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
-	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
 	gtk_entry_set_text(GTK_ENTRY(widget), current_profile.password);
 	gtk_entry_set_visibility(GTK_ENTRY(widget), FALSE);
-	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-press-event", G_CALLBACK(on_retry_entry_keypress), dialog);
 	retry.password = widget;
 	widget = gtk_check_button_new_with_label("Show");
-	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "toggled", G_CALLBACK(on_retry_show_password_toggled), NULL);
 	
 	gtk_box_pack_start(GTK_BOX(vbox), table, FALSE, FALSE, 0);
@@ -169,7 +179,7 @@ static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, vo
 	gdk_threads_leave();
 	if (g_regex_match_simple("^530|500\\sUSER", firstline, 0, 0)) {
 		curl_easy_reset(curl);
-		try_another_username_password();
+		try_another_username_password(firstline);
 	}
 	return 0;
 }
@@ -762,9 +772,8 @@ static void *get_dir_listing(gpointer p)
 	free(str.ptr);
 	end:
 	gdk_threads_enter();
-	g_free(ofilename);
-	g_free(listing);
-	g_key_file_free(cachekeyfile);
+	// don't g_free(listing) / g_free(ofilename) / g_key_file_free(cachekeyfile)
+	// as it will cause crash after try_another_username_password();
 	g_free(lsfrom);
 	g_free(lsto);
 	ui_progress_bar_stop();
@@ -1434,10 +1443,12 @@ static void save_hosts()
 	gsize i;
 	gchar** hostsparts;
 	for (i = 0; i < g_strv_length(all_hosts); i++) {
-		hostsparts = g_strsplit(all_hosts[i], " ", 0);
-		g_key_file_set_string(hosts, hostsparts[0], "ip_address", hostsparts[1]);
-		g_strfreev(hostsparts);
+		if (g_regex_match_simple("^(.*)\\s(.*)$", all_hosts[i], 0, 0)) {
+			hostsparts = g_strsplit(all_hosts[i], " ", 0);
+			g_key_file_set_string(hosts, hostsparts[0], "ip_address", hostsparts[1]);
+		}
 	}
+	g_strfreev(hostsparts);
 	if (g_mkdir_with_parents(hosts_dir, 0777)==0) {
 		data = g_key_file_to_data(hosts, NULL, NULL);
 		utils_write_file(hosts_file, data);
@@ -2192,6 +2203,7 @@ static void on_profile_organize_clicked(GtkToolButton *toolbutton, gpointer p)
 {
 	GtkTreePath *path;
 	gtk_tree_view_get_cursor(GTK_TREE_VIEW(pref.p_view), &path, NULL);
+	g_return_if_fail(path!=NULL);
 	gtk_tree_path_next(path);
 	gtk_tree_path_next(path);
 	GtkTreeIter iter;
