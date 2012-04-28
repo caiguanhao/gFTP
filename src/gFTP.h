@@ -67,6 +67,7 @@ struct uploadf {
 static struct
 {
 	GtkWidget *connect;
+	GtkWidget *abort;
 	GtkWidget *proxy;
 	GtkWidget *preference;
 } toolbar;

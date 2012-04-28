@@ -199,6 +199,7 @@ static gchar *find_host (gchar *src)
 
 static void add_pending_item(gint type, gchar *n1, gchar *n2)
 {
+	g_return_if_fail(to_abort==FALSE);
 	GtkTreeIter iter;
 	switch (type) {
 		case 0: //upload
@@ -216,17 +217,13 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 			-1);
 			break;
 		case 2: //load dir
-			gtk_list_store_append(pending_store, &iter);
-			gtk_list_store_set(pending_store, &iter,
-			0, GTK_STOCK_REFRESH, 
-			1, "loading", 2, 0, 3, 0, 4, n1, 5, g_utf8_strlen(n2, -1)>0?n2:"", 6, 2, 
-			-1);
-			break;
+		case 22: //load dir after previous command (used to abort together)
 		case 222: //load dir (cache enabled)
+		case 2222: //load dir after previous command (cache enabled)
 			gtk_list_store_append(pending_store, &iter);
 			gtk_list_store_set(pending_store, &iter,
 			0, GTK_STOCK_REFRESH, 
-			1, "loading", 2, 0, 3, 0, 4, n1, 5, g_utf8_strlen(n2, -1)>0?n2:"", 6, 222, 
+			1, "loading", 2, 0, 3, 0, 4, n1, 5, g_utf8_strlen(n2, -1)>0?n2:"", 6, type, 
 			-1);
 			break;
 		case 3: //commands
@@ -569,7 +566,7 @@ static void *download_file(gpointer p)
 		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Total download time: %0.3f s.", val));
 		curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD, &val);
 		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Average download speed: %s/s.", g_format_size_for_display(val)));
-		if (dlto)
+		if (!to_abort && dlto)
 			if (!document_open_file(dlto, FALSE, NULL, NULL))
 				if (dialogs_show_question("Could not open the file in Geany. View it in file browser?"))
 					open_external(g_path_get_dirname(dlto));
@@ -777,7 +774,7 @@ static void *get_dir_listing(gpointer p)
 	g_free(lsfrom);
 	g_free(lsto);
 	ui_progress_bar_stop();
-	execute_end(cache_enabled?222:2);
+	execute_end(2);
 	gdk_threads_leave();
 	g_thread_exit(NULL);
 	return NULL;
@@ -902,6 +899,7 @@ static void execute()
 {
 	g_return_if_fail(running==FALSE);
 	running = TRUE;
+	gtk_widget_set_sensitive(toolbar.abort, TRUE);
 	gint type;
 	gchar *remote;
 	gchar *local;
@@ -924,7 +922,9 @@ static void execute()
 				break;
 			}
 			case 2:
-			case 222: {
+			case 22:
+			case 222:
+			case 2222: {
 				struct transfer ls;
 				ls.from = g_strconcat(g_path_get_dirname(remote), "/", NULL);
 				ls.to = g_strdup(local);
@@ -946,6 +946,7 @@ static void execute()
 			}
 			default: {
 				running = FALSE;
+				gtk_widget_set_sensitive(toolbar.abort, FALSE);
 			}
 		}
 		gint i=0,y=0; //Used to stop an unknown error.
@@ -969,13 +970,24 @@ static void execute_end(gint type)
 		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 6, &ptype, -1);
 		
 		if (type==ptype) delete = TRUE;
+		if (type==2 && (ptype==2222 || ptype==222 || ptype==22)) delete = TRUE;
 		
 		if (delete) {
 			gtk_list_store_remove(GTK_LIST_STORE(pending_store), &current_pending);
 			gtk_tree_view_columns_autosize(GTK_TREE_VIEW(pending_view));
+			if (to_abort) {
+				while (gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
+					gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 6, &ptype, -1);
+					if (ptype && (ptype==22 || ptype==2222)) 
+						gtk_list_store_remove(GTK_LIST_STORE(pending_store), &current_pending);
+					else
+						break;
+				}
+			}
 		}
 	}
 	running = FALSE;
+	gtk_widget_set_sensitive(toolbar.abort, FALSE);
 	if (!to_abort && gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pending_store), &current_pending)) {
 		g_timeout_add(200, (GSourceFunc)execute_wait, NULL);
 	}
@@ -1046,6 +1058,7 @@ static void *disconnect(gpointer p)
 		curl = NULL;
 	}
 	clear();
+	gtk_widget_set_sensitive(toolbar.abort, FALSE);
 	return NULL;
 }
 
@@ -1674,9 +1687,28 @@ static gchar *return_web_url(gchar *name, gboolean is_dir)
 	return g_strdup_printf("%s%s", url, rel);
 }
 
+static gboolean on_abort_check_aborted(gpointer user_data)
+{
+	if (gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pending_store), NULL)==0) {
+		log_new_str(COLOR_RED, "Aborted by user.");
+		to_abort = FALSE;
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static void on_abort_clicked(GtkToolButton *toolbutton, gpointer user_data)
+{
+	g_return_if_fail(to_abort==FALSE);
+	to_abort = TRUE;
+	log_new_str(COLOR_RED, "Aborting...");
+	g_timeout_add(100, (GSourceFunc)on_abort_check_aborted, NULL);
+}
+
 static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 {
 	g_return_if_fail(adding==FALSE);
+	g_return_if_fail(to_abort==FALSE);
 	adding = TRUE;
 	gint type = (int)user_data;
 	GtkTreeSelection *treesel;
@@ -1701,7 +1733,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				cmd = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Please input folder name:\n(to create multi-level folders,\nuse Create Blank File instead)", "New Folder");
 				if (cmd && g_utf8_strlen(cmd, -1)>0) {
 					add_pending_item(3, name, g_strdup_printf("MKD %s", cmd));
-					if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
+					if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 					g_free(cmd);
 				}
 				break;
@@ -1714,7 +1746,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
 							if (dirname) {
 								add_pending_item(3, name, g_strdup_printf("RMD %s", dirname));
-								if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
+								if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 								g_free(dirname);
 							}
 						}
@@ -1733,7 +1765,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				if (filename && g_utf8_strlen(filename, -1)>0) {
 					filepath = g_strdup_printf("%s%s", name, filename);
 					add_pending_item(55, filepath, "");
-					if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
+					if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 					g_free(filepath);
 					g_free(filename);
 				}
@@ -1747,7 +1779,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
 							if (dirname) {
 								add_pending_item(3, name, g_strdup_printf("DELE %s", dirname));
-								if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
+								if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 								g_free(dirname);
 							}
 						}
@@ -1766,7 +1798,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 							if (reto && g_utf8_strlen(reto, -1)>0) {
 								if (g_strcmp0(reto, dirname)!=0) {
 									add_pending_item(3, name, g_strdup_printf("RNFR %s\nRNTO %s", dirname, reto));
-									if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
+									if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 								}
 								g_free(reto);
 							}
@@ -1828,7 +1860,7 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
 		gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_DIR, &name, -1);
 		if (is_folder_selected(list)) {
 			gtk_tree_model_get_iter(model, &parent, treepath);
-			add_pending_item(222, name, NULL);
+			add_pending_item(2222, name, NULL);
 			if (p) {
 				gchar *remote = (gchar *)p;
 				gchar **remoteparts = g_strsplit(remote, "/", 0);
@@ -1837,7 +1869,7 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
 				for (i=0; i<g_strv_length(remoteparts); i++) {
 					if (g_strcmp0(remoteparts[i], "")!=0) {
 						remote = g_strconcat(remote, remoteparts[i], "/", NULL);
-						add_pending_item(222, remote, remote);
+						add_pending_item(2222, remote, remote);
 					}
 				}
 			}
@@ -2404,7 +2436,7 @@ static void on_document_save()
 		dst = g_file_get_relative_path(g_file_new_for_path(putdir), g_file_new_for_path(filepath));
 		if (dst) {
 			add_pending_item(0, dst, filepath);
-			if (redefine_parent_iter(dst, FALSE)) add_pending_item(2, dst, NULL);
+			if (redefine_parent_iter(dst, FALSE)) add_pending_item(22, dst, NULL);
 		}
 		g_free(putdir);
 	}
@@ -2451,7 +2483,7 @@ static void on_window_drag_data_received(GtkWidget *widget, GdkDragContext *drag
 			add_pending_item(0, dst, filepath);
 			filename = strtok(NULL, "\r\n");
 		}
-		add_pending_item(2, dst, NULL);
+		add_pending_item(22, dst, NULL);
 		g_free(filenames);
 		g_free(filename);
 		success = TRUE;
@@ -2594,6 +2626,16 @@ static GtkWidget *make_toolbar(void)
 	g_signal_connect(widget, "clicked", G_CALLBACK(on_connect_clicked), NULL);
 	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
 	toolbar.connect = widget;
+	
+	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_STOP));
+	gtk_widget_set_sensitive(widget, FALSE);
+	gtk_widget_set_tooltip_text(widget, "Abort");
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_abort_clicked), NULL);
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
+	toolbar.abort = widget;
+	
+	widget = GTK_WIDGET(gtk_separator_tool_item_new());
+	gtk_container_add(GTK_CONTAINER(tool_bar), widget);
 	
 	widget = GTK_WIDGET(gtk_tool_button_new_from_stock(GTK_STOCK_NETWORK));
 	gtk_widget_set_tooltip_text(widget, "Proxy profiles");
