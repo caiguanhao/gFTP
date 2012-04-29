@@ -86,6 +86,10 @@ static struct
 	GtkWidget *anon;
 	gulong anon_handler_id;
 	GtkWidget *showpass;
+	GtkWidget *auth;
+	gulong auth_handler_id;
+	GtkWidget *privatekey;
+	GtkWidget *browsekey;
 	GtkWidget *remote;
 	GtkWidget *usecurrent;
 	GtkWidget *local;
@@ -133,6 +137,8 @@ static struct
 	char *local;
 	char *webhost;
 	char *prefix;
+	char *auth;
+	char *privatekey;
 } current_profile;
 
 static void add_pending_item(gint type, gchar *n1, gchar *n2);
