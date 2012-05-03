@@ -126,20 +126,23 @@ static struct
 
 static struct 
 {
-	char *url;
-	int index;
-	char *name;
-	char *host;
-	char *port;
-	char *login;
-	char *password;
-	char *remote;
-	char *local;
-	char *webhost;
-	char *prefix;
-	char *auth;
-	char *privatekey;
+	gchar *url;
+	gint index;
+	gchar *name;
+	gchar *host;
+	gchar *port;
+	gchar *login;
+	gchar *password;
+	gchar *remote;
+	gchar *local;
+	gchar *webhost;
+	gchar *prefix;
+	gchar *auth;
+	gchar *cert;
+	gchar *privatekey;
 } current_profile;
+
+#define IS_CURRENT_PROFILE_SFTP g_strcmp0(current_profile.auth, "SFTP")==0
 
 static void add_pending_item(gint type, gchar *n1, gchar *n2);
 static void save_profiles(gint type);
@@ -161,6 +164,7 @@ static void on_retry_dialog_response(GtkDialog *dialog, gint response, gpointer 
 static size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream);
 static size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str);
 static gboolean focus_widget(gpointer p);
+static int to_auth_type(gchar *type);
 static int to_proxy_type(gchar *type);
 static gchar **parse_proxy_string(gchar *name);
 static gchar *encrypt(gchar *src);

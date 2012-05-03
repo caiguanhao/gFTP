@@ -1,4 +1,5 @@
 #include <geanyplugin.h>
+#include <openssl/ssl.h>
 #include <curl/curl.h>
 #include <sys/stat.h>
 #include <stdlib.h>
@@ -15,8 +16,6 @@ PLUGIN_VERSION_CHECK(211)
 PLUGIN_SET_INFO("gFTP", "FTP Plugin for Geany.", "1.0", "Cai Guanhao <caiguanhao@gmail.com>");
 
 PLUGIN_KEY_GROUP(gFTP, KB_COUNT)
-
-#define IS_CURRENT_PROFILE_SFTP g_strcmp0(current_profile.auth, "SFTP")==0
 
 static void try_another_username_password(gchar *raw)
 {
@@ -132,7 +131,6 @@ static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, vo
 	}
 	switch (type) {
 		case CURLINFO_TEXT:
-			log_new_str(COLOR_BLUE, firstline);
 			break;
 		default:
 			break;
@@ -539,7 +537,258 @@ static gboolean proxy_config()
 	return FALSE;
 }
 
-static gboolean auth_config()
+static CURLcode sslctx_function(CURL *curl, void *sslctx, void *parm) {
+	if (g_regex_match_simple("^-----BEGIN\\sCERTIFICATE-----(.+?)-----END\\sCERTIFICATE-----\n$", current_profile.cert, G_REGEX_MULTILINE | G_REGEX_DOTALL, 0)) {
+		X509_STORE *store;
+		X509 *cert=NULL;
+		BIO *bio;
+		char *mypem = current_profile.cert;
+		bio=BIO_new_mem_buf(mypem, -1);
+		PEM_read_bio_X509(bio, &cert, 0, NULL);
+		if (cert == NULL) {
+			gdk_threads_enter();
+			log_new_str(COLOR_RED, "Error in reading certificates.");
+			gdk_threads_leave();
+		}
+		store = SSL_CTX_get_cert_store((SSL_CTX *)sslctx);
+		if (X509_STORE_add_cert(store, cert)==0) {
+			gdk_threads_enter();
+			log_new_str(COLOR_RED, "Error in adding certificates.");
+			gdk_threads_leave();
+		}
+	}
+	return CURLE_OK ;
+}
+
+static gchar *certificate_date(const ASN1_UTCTIME *tm) { //from OpenSSL source: /crypto/asn1/t_x509.c
+	const char *v;
+	int gmt = 0;
+	int i;
+	int y = 0, M = 0, d = 0, h = 0, m = 0, s = 0;
+	i = tm->length;
+	v = (const char *)tm->data;
+	if (i < 10) return NULL;
+	if (v[i-1] == 'Z') gmt=1;
+	for (i=0; i<10; i++)
+		if ((v[i] > '9') || (v[i] < '0')) return NULL;
+	y = (v[0]-'0')*10+(v[1]-'0');
+	if (y < 50) y += 100;
+	M = (v[2]-'0')*10+(v[3]-'0');
+	if ((M > 12) || (M < 1)) return NULL;
+	d = (v[4]-'0')*10+(v[5]-'0');
+	h = (v[6]-'0')*10+(v[7]-'0');
+	m = (v[8]-'0')*10+(v[9]-'0');
+	if (tm->length >=12 && (v[10] >= '0') && (v[10] <= '9') && (v[11] >= '0') && (v[11] <= '9'))
+		s=(v[10]-'0')*10+(v[11]-'0');
+	char *mon[12]={"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
+	return g_strdup_printf("%s %2d %02d:%02d:%02d %d%s", mon[M-1],d,h,m,s,y+1900,(gmt)?" GMT":"");
+}
+
+static gint show_certificates(gchar *raw)
+{
+	GtkWidget *dialog, *vbox;
+	GtkWidget *notebook, *notebook_chains, *widget, *table, *frame, *box;
+	gint ret = 0;
+	dialog = gtk_dialog_new_with_buttons("Unknown certificate", GTK_WINDOW(geany->main_widgets->window),
+		GTK_DIALOG_DESTROY_WITH_PARENT, 
+		GTK_STOCK_NO, GTK_RESPONSE_NO, 
+		GTK_STOCK_YES, GTK_RESPONSE_YES, 
+		NULL);
+	gtk_button_box_set_layout(GTK_BUTTON_BOX(gtk_dialog_get_action_area(GTK_DIALOG(dialog))), GTK_BUTTONBOX_SPREAD);
+	gtk_widget_grab_focus(gtk_dialog_get_widget_for_response(GTK_DIALOG(dialog), GTK_RESPONSE_NO));
+	vbox = ui_dialog_vbox_new(GTK_DIALOG(dialog));
+	gtk_box_set_spacing(GTK_BOX(vbox), 6);
+	
+	gchar *de_fields[] = {"Issued On", "Expires On", "Serial Number", "SHA1 Fingerprint", "MD5 Fingerprint", NULL};
+	gchar *is_fields[] = {"Common Name (CN)", "Organization (O)", "Organizational Unit (OU)", "Country (C)", "State/Province (ST)", "Locality (L)", "E-mail (emailAddress)", NULL};
+	gchar *cert_keys[] = {"CN","O","OU","C","ST","L","emailAddress", NULL};
+	gchar *deta_vals[5];
+	gchar *subj_vals[7];
+	gchar *issu_vals[7];
+	
+	GSList *certs = NULL;
+	GRegex *regex;
+	GMatchInfo *match_info;
+	regex = g_regex_new("-----BEGIN\\sCERTIFICATE-----(.+?)-----END\\sCERTIFICATE-----\n", G_REGEX_MULTILINE | G_REGEX_DOTALL, 0, NULL);
+	g_regex_match(regex, raw, 0, &match_info);
+	while (g_match_info_matches(match_info)) {
+		certs = g_slist_prepend(certs, g_match_info_fetch(match_info, 0));
+		g_match_info_next(match_info, NULL);
+	}
+	if (g_slist_length(certs)==0) return 1;
+	certs = g_slist_reverse(certs);
+	if (g_slist_length(certs)>1) notebook_chains = gtk_notebook_new();
+	
+	int c, s, i;
+	X509 *cert;
+	BIO *bio;
+	for(c=0; c<g_slist_length(certs); c++) {
+		for (i=0; i<5; i++) {
+			deta_vals[i] = "";
+		}
+		for (i=0; i<7; i++) {
+			subj_vals[i] = "";
+			issu_vals[i] = "";
+		}
+		
+		bio = BIO_new_mem_buf(g_slist_nth_data(certs, c), -1);
+		cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+		
+		deta_vals[0] = certificate_date(X509_get_notBefore(cert));
+		deta_vals[1] = certificate_date(X509_get_notAfter(cert));
+		
+		char buf[BUFSIZ];
+		gchar *sidata;
+		int pos;
+		
+		for (s=0; s<2; s++) {
+			if (s==0) {
+				X509_NAME_oneline(X509_get_subject_name(cert), buf, sizeof buf);
+			} else {
+				X509_NAME_oneline(X509_get_issuer_name(cert), buf, sizeof buf);
+			}
+			sidata = g_strdup_printf("%s/CN=", buf);
+			for (i=0; i<7; i++) {
+				regex = g_regex_new(g_strdup_printf("/%s=(.+?)/(%s)=", cert_keys[i], g_strjoinv("|", cert_keys)), 0, 0, NULL);
+				pos = 0;
+				while (g_regex_match_full(regex, sidata, -1, pos, 0, &match_info, NULL)) {
+					while (g_match_info_matches(match_info)) {
+						if (s==0) {
+							if (g_utf8_strlen(subj_vals[i], -1)>0) subj_vals[i] = g_strconcat(subj_vals[i], "\n", NULL);
+							subj_vals[i] = g_strconcat(subj_vals[i], g_match_info_fetch(match_info, 1), NULL);
+						} else {
+							if (g_utf8_strlen(issu_vals[i], -1)>0) issu_vals[i] = g_strconcat(issu_vals[i], "\n", NULL);
+							issu_vals[i] = g_strconcat(issu_vals[i], g_match_info_fetch(match_info, 1), NULL);
+						}
+						g_match_info_fetch_pos(match_info, 1, NULL, &pos);
+						g_match_info_next(match_info, NULL);
+					}
+				}
+			}
+		}
+		
+		ASN1_INTEGER *num;
+		num=X509_get_serialNumber(cert);
+		int j;
+		for (j=0; j<num->length; j++) {
+			if (j==0) 
+				deta_vals[2] = g_strdup_printf("%02X", num->data[j]);
+			else
+				deta_vals[2] = g_strdup_printf("%s:%02X", deta_vals[2], num->data[j]);
+		}
+		// from openssl source (/apps/x509.c)
+		unsigned int n;
+		unsigned char md[EVP_MAX_MD_SIZE];
+		gchar *digest[2] = {"sha1", "md5"};
+		for (i=0; i<2; i++) {
+			if (X509_digest(cert, EVP_get_digestbyname(digest[i]), md, &n)) {
+				for (j=0; j<(int)n; j++) {
+					if (j==0) 
+						deta_vals[3+i] = g_strdup_printf("%02X", md[j]);
+					else
+						deta_vals[3+i] = g_strdup_printf("%s:%02X", deta_vals[3+i], md[j]);
+				}
+			}
+		}
+		
+		notebook = gtk_notebook_new();
+		box = gtk_table_new(2, 2, FALSE);
+		
+		frame = gtk_frame_new("Details");
+		table = gtk_table_new(5, 2, FALSE);
+		for (i=0; i<5; i++) {
+			widget = gtk_label_new(de_fields[i]);
+			gtk_misc_set_alignment(GTK_MISC(widget), 1, 0);
+			gtk_table_attach(GTK_TABLE(table), widget, 0, 1, i, i+1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+			widget = gtk_label_new(deta_vals[i]);
+			gtk_misc_set_alignment(GTK_MISC(widget), 0, 0);
+			gtk_table_attach(GTK_TABLE(table), widget, 1, 2, i, i+1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+		}
+		gtk_container_add(GTK_CONTAINER(frame), table);
+		gtk_table_attach(GTK_TABLE(box), frame, 0, 2, 0, 1, GTK_EXPAND | GTK_FILL, GTK_EXPAND | GTK_FILL, 5, 5);
+		
+		frame = gtk_frame_new("Subject");
+		table = gtk_table_new(7, 2, FALSE);
+		for (i=0; i<7; i++) {
+			widget = gtk_label_new(is_fields[i]);
+			gtk_misc_set_alignment(GTK_MISC(widget), 1, 0);
+			gtk_table_attach(GTK_TABLE(table), widget, 0, 1, i, i+1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+			widget = gtk_label_new(subj_vals[i]);
+			gtk_misc_set_alignment(GTK_MISC(widget), 0, 0);
+			gtk_table_attach(GTK_TABLE(table), widget, 1, 2, i, i+1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+		}
+		gtk_container_add(GTK_CONTAINER(frame), table);
+		gtk_table_attach(GTK_TABLE(box), frame, 0, 1, 1, 2, GTK_EXPAND | GTK_FILL, GTK_EXPAND | GTK_FILL, 5, 5);
+		
+		frame = gtk_frame_new("Issuer");
+		table = gtk_table_new(7, 2, FALSE);
+		for (i=0; i<7; i++) {
+			widget = gtk_label_new(is_fields[i]);
+			gtk_misc_set_alignment(GTK_MISC(widget), 1, 0);
+			gtk_table_attach(GTK_TABLE(table), widget, 0, 1, i, i+1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+			widget = gtk_label_new(issu_vals[i]);
+			gtk_misc_set_alignment(GTK_MISC(widget), 0, 0);
+			gtk_table_attach(GTK_TABLE(table), widget, 1, 2, i, i+1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+		}
+		gtk_container_add(GTK_CONTAINER(frame), table);
+		gtk_table_attach(GTK_TABLE(box), frame, 1, 2, 1, 2, GTK_EXPAND | GTK_FILL, GTK_EXPAND | GTK_FILL, 5, 5);
+		
+		gtk_notebook_append_page(GTK_NOTEBOOK(notebook), box, gtk_label_new("General"));
+		
+		box = gtk_table_new(1, 1, FALSE);
+		GtkWidget *txtview;
+		GtkTextIter iter;
+		GtkTextBuffer *buffer = gtk_text_buffer_new(NULL);
+		widget = gtk_text_view_new_with_buffer(buffer);
+		gtk_text_buffer_get_end_iter(buffer, &iter);
+		gtk_text_buffer_insert(buffer, &iter, g_slist_nth_data(certs, c), -1);
+		PangoFontDescription *pfd = pango_font_description_new();
+		pango_font_description_set_size(pfd, 8 * PANGO_SCALE);
+		pango_font_description_set_family(pfd, "Monospace");
+		gtk_widget_modify_font(widget, pfd);
+		pango_font_description_free(pfd);
+		gtk_text_view_set_editable(GTK_TEXT_VIEW(widget), FALSE);
+		txtview = widget;
+		
+		widget = gtk_scrolled_window_new(NULL, NULL);
+		gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(widget),	GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+		gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(widget), txtview);
+		
+		gtk_table_attach(GTK_TABLE(box), widget, 0, 1, 0, 1, GTK_EXPAND | GTK_FILL, GTK_EXPAND | GTK_FILL, 5, 5);
+		gtk_notebook_append_page(GTK_NOTEBOOK(notebook), box, gtk_label_new("Raw"));
+		if (g_slist_length(certs)>1) 
+			gtk_notebook_append_page(GTK_NOTEBOOK(notebook_chains), notebook, gtk_label_new(g_strdup_printf("Cert. %d", c)));
+	}
+	
+	if (g_slist_length(certs)>1)
+		gtk_box_pack_start(GTK_BOX(vbox), notebook_chains, TRUE, TRUE, 0);
+	else
+		gtk_box_pack_start(GTK_BOX(vbox), notebook, TRUE, TRUE, 0);
+	
+	box = gtk_table_new(1, 2, FALSE);
+	widget = gtk_image_new_from_stock(GTK_STOCK_DIALOG_QUESTION, GTK_ICON_SIZE_BUTTON);
+	gtk_table_attach(GTK_TABLE(box), widget, 0, 1, 0, 1, GTK_SHRINK, GTK_SHRINK, 5, 5);
+	widget = gtk_label_new("<b>Do you trust this certificate on the server?</b>\nIf you are not sure, it is recommended that you choose No.");
+	gtk_label_set_use_markup(GTK_LABEL(widget), TRUE);
+	gtk_table_attach(GTK_TABLE(box), widget, 1, 2, 0, 1, GTK_SHRINK, GTK_SHRINK, 5, 5);
+	table = gtk_table_new(1, 1, FALSE);
+	gtk_table_attach(GTK_TABLE(table), box, 0, 1, 0, 1, GTK_EXPAND, GTK_EXPAND, 0, 0);
+	gtk_box_pack_start(GTK_BOX(vbox), table, TRUE, TRUE, 0);
+	
+	gtk_widget_show_all(dialog);
+	ret = gtk_dialog_run(GTK_DIALOG(dialog));
+	gtk_widget_destroy(dialog);
+	
+	if (ret==GTK_RESPONSE_YES) ret=0; else ret=1;
+	if (ret==0) current_profile.cert = g_slist_nth_data(certs, 0);
+	
+	g_slist_free(certs);
+	g_match_info_free(match_info);
+	g_regex_unref(regex);
+	return ret;
+}
+
+static int auth_config()
 {
 	if (IS_CURRENT_PROFILE_SFTP) {
 		gchar *sshkeydir;
@@ -563,11 +812,60 @@ static gboolean auth_config()
 		g_free(sshkeydir);
 		g_free(sshkey_public);
 		g_free(sshkey);
+	} else {
+		switch (to_auth_type(current_profile.auth)) {
+			case 2: {
+					gdk_threads_enter();
+					log_new_str(COLOR_BLUE, "Initializing certificates...");
+					gdk_threads_leave();
+
+					GError *error = NULL;
+					gchar *result = NULL;
+					gchar **argv;
+					gchar *command;
+					command = g_strdup_printf("openssl s_client -connect %s:%s -showcerts -starttls ftp", current_profile.host, current_profile.port);
+					g_shell_parse_argv(command, NULL, &argv, NULL);
+					if (g_spawn_sync("/usr/bin", argv, NULL, G_SPAWN_LEAVE_DESCRIPTORS_OPEN, NULL, NULL, &result, NULL, NULL, &error)) {
+						if (to_abort) return 1;
+						gint ret = 1;
+						gdk_threads_enter();
+						log_new_str(COLOR_BLUE, "Verifying certificate...");
+						if (g_regex_match_simple("-----BEGIN\\sCERTIFICATE-----(.+?)-----END\\sCERTIFICATE-----\n", result, G_REGEX_MULTILINE | G_REGEX_DOTALL, 0)) {
+							ret = show_certificates(result);
+							if (ret==0) log_new_str(COLOR_BLUE, "Certificate verified by user.");
+						}
+						gdk_threads_leave();
+						if (ret!=0) return 1;
+					} else {
+						gdk_threads_enter();
+						log_new_str(COLOR_RED, g_strdup_printf("Error: %s", error->message));
+						dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Unable to run /usr/bin/openssl to verify certificate. Make sure OpenSSL is properly installed.");
+						gdk_threads_leave();
+						g_error_free(error);
+						return 1;
+					}
+					curl_easy_setopt(curl, CURLOPT_USE_SSL, CURLUSESSL_ALL);
+					curl_easy_setopt(curl, CURLOPT_FTPSSLAUTH, CURLFTPAUTH_TLS);
+					curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1);
+					curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+					curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 1L);
+					curl_easy_setopt(curl, CURLOPT_CERTINFO, 1L);
+					curl_easy_setopt(curl, CURLOPT_SSLCERTTYPE, "PEM");
+					curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, *sslctx_function);
+				}
+				break;
+			case 3:
+				curl_easy_setopt(curl, CURLOPT_FTPSSLAUTH, CURLFTPAUTH_SSL);
+				curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+				curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+				curl_easy_setopt(curl, CURLOPT_CERTINFO, 1L);
+				break;
+		}
 	}
 	curl_easy_setopt(curl, CURLOPT_PORT, port_config(current_profile.port));
 	curl_easy_setopt(curl, CURLOPT_USERNAME, current_profile.login);
 	curl_easy_setopt(curl, CURLOPT_PASSWORD, current_profile.password);
-	return TRUE;
+	return 0;
 }
 
 static void *download_file(gpointer p)
@@ -757,7 +1055,12 @@ static void *get_dir_listing(gpointer p)
 		if (download_listing) {
 			curl_easy_setopt(curl, CURLOPT_URL, url);
 			proxy_config();
-			auth_config();
+			if (auth_config()!=0) {
+				gdk_threads_enter();
+				log_new_str(COLOR_RED, "Authentication failed!");
+				gdk_threads_leave();
+				goto end;
+			}
 			curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_function);
 			curl_easy_setopt(curl, CURLOPT_WRITEDATA, &str);
 			curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, normal_progress);
@@ -1331,6 +1634,7 @@ static void load_profiles(gint type)
 			current_profile.prefix = utils_get_setting_string(profiles, all_profiles[i], "prefix", "");
 			current_profile.auth = utils_get_setting_string(profiles, all_profiles[i], "auth", "");
 			current_profile.privatekey = utils_get_setting_string(profiles, all_profiles[i], "privatekey", "");
+			current_profile.cert = "";
 		}
 	}
 	g_key_file_free(profiles);
