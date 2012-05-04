@@ -158,10 +158,12 @@ static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, vo
 		gchar *tipaddr = g_match_info_fetch(match_info, 2);
 		if (!g_hostname_is_ip_address(thost) && g_utf8_strlen(tipaddr, -1)>=8) {
 			gchar *xhosts = g_strjoinv("\n", all_hosts);
-			xhosts = g_strjoin("\n", xhosts, g_strdup_printf("%s %s", thost, tipaddr), NULL);
-			all_hosts = g_strsplit(xhosts, "\n", 0);
-			save_hosts();
-			log_new_str(COLOR_BLUE, "New host saved.");
+			if (!g_regex_match_simple(g_regex_escape_string(thost, -1), xhosts, G_REGEX_MULTILINE, 0)) {
+				xhosts = g_strjoin("\n", xhosts, g_strdup_printf("%s %s", thost, tipaddr), NULL);
+				all_hosts = g_strsplit(xhosts, "\n", 0);
+				save_hosts();
+				log_new_str(COLOR_BLUE, "New host saved.");
+			}
 			g_free(xhosts);
 		}
 		g_free(thost);
@@ -599,6 +601,14 @@ static gint show_certificates(gchar *raw)
 	vbox = ui_dialog_vbox_new(GTK_DIALOG(dialog));
 	gtk_box_set_spacing(GTK_BOX(vbox), 6);
 	
+	box = gtk_table_new(1, 2, FALSE);
+	widget = gtk_image_new_from_stock(GTK_STOCK_DIALOG_AUTHENTICATION, GTK_ICON_SIZE_BUTTON);
+	gtk_table_attach(GTK_TABLE(box), widget, 0, 1, 0, 1, GTK_SHRINK, GTK_SHRINK, 2, 2);
+	widget = gtk_label_new(g_strdup_printf("<b>The certificate from %s:%s is unknown. Make sure this server can be trusted.</b>", current_profile.host, current_profile.port));
+	gtk_label_set_use_markup(GTK_LABEL(widget), TRUE);
+	gtk_table_attach(GTK_TABLE(box), widget, 1, 2, 0, 1, GTK_SHRINK, GTK_SHRINK, 2, 2);
+	gtk_box_pack_start(GTK_BOX(vbox), box, TRUE, TRUE, 0);
+	
 	gchar *de_fields[] = {"Issued On", "Expires On", "Serial Number", "SHA1 Fingerprint", "MD5 Fingerprint", NULL};
 	gchar *is_fields[] = {"Common Name (CN)", "Organization (O)", "Organizational Unit (OU)", "Country (C)", "State/Province (ST)", "Locality (L)", "E-mail (emailAddress)", NULL};
 	gchar *cert_keys[] = {"CN","O","OU","C","ST","L","emailAddress", NULL};
@@ -765,6 +775,21 @@ static gint show_certificates(gchar *raw)
 	else
 		gtk_box_pack_start(GTK_BOX(vbox), notebook, TRUE, TRUE, 0);
 	
+	gchar *verify = "N/A";
+	regex = g_regex_new("verify\\sreturn\\scode:\\s(\\d+)\\s\\((.+?)\\)", G_REGEX_CASELESS, 0, NULL);
+	g_regex_match(regex, raw, 0, &match_info);
+	if (g_match_info_matches(match_info)) {
+		verify = g_strdup_printf("%s - %s", g_match_info_fetch(match_info, 1), g_utf8_strup(g_match_info_fetch(match_info, 2), -1));
+	}
+	
+	frame = gtk_frame_new("Certificate Verify Result");
+	gtk_frame_set_label_align(GTK_FRAME(frame), 0.5, 0.5);
+	box = gtk_table_new(1, 1, FALSE);
+	widget = gtk_label_new(verify);
+	gtk_table_attach(GTK_TABLE(box), widget, 0, 1, 0, 1, GTK_EXPAND | GTK_FILL, GTK_EXPAND | GTK_FILL, 5, 5);
+	gtk_container_add(GTK_CONTAINER(frame), box);
+	gtk_box_pack_start(GTK_BOX(vbox), frame, TRUE, TRUE, 0);
+	
 	box = gtk_table_new(1, 2, FALSE);
 	widget = gtk_image_new_from_stock(GTK_STOCK_DIALOG_QUESTION, GTK_ICON_SIZE_BUTTON);
 	gtk_table_attach(GTK_TABLE(box), widget, 0, 1, 0, 1, GTK_SHRINK, GTK_SHRINK, 5, 5);
@@ -813,8 +838,11 @@ static int auth_config()
 		g_free(sshkey_public);
 		g_free(sshkey);
 	} else {
-		switch (to_auth_type(current_profile.auth)) {
-			case 2: {
+		gint type = to_auth_type(current_profile.auth);
+		switch (type) {
+			case 2:
+			case 3:
+				if (!g_regex_match_simple("^-----BEGIN\\sCERTIFICATE-----(.+?)-----END\\sCERTIFICATE-----\n$", current_profile.cert, G_REGEX_MULTILINE | G_REGEX_DOTALL, 0)) {
 					gdk_threads_enter();
 					log_new_str(COLOR_BLUE, "Initializing certificates...");
 					gdk_threads_leave();
@@ -844,21 +872,20 @@ static int auth_config()
 						g_error_free(error);
 						return 1;
 					}
-					curl_easy_setopt(curl, CURLOPT_USE_SSL, CURLUSESSL_ALL);
+				}
+				curl_easy_setopt(curl, CURLOPT_USE_SSL, CURLUSESSL_ALL);
+				if (type==2) {
 					curl_easy_setopt(curl, CURLOPT_FTPSSLAUTH, CURLFTPAUTH_TLS);
 					curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1);
-					curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-					curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 1L);
-					curl_easy_setopt(curl, CURLOPT_CERTINFO, 1L);
-					curl_easy_setopt(curl, CURLOPT_SSLCERTTYPE, "PEM");
-					curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, *sslctx_function);
+				} else if (type==3) {
+					curl_easy_setopt(curl, CURLOPT_FTPSSLAUTH, CURLFTPAUTH_SSL);
+					curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_SSLv3);
 				}
-				break;
-			case 3:
-				curl_easy_setopt(curl, CURLOPT_FTPSSLAUTH, CURLFTPAUTH_SSL);
-				curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-				curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+				curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+				curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 1L);
 				curl_easy_setopt(curl, CURLOPT_CERTINFO, 1L);
+				curl_easy_setopt(curl, CURLOPT_SSLCERTTYPE, "PEM");
+				curl_easy_setopt(curl, CURLOPT_SSL_CTX_FUNCTION, *sslctx_function);
 				break;
 		}
 	}
@@ -880,7 +907,7 @@ static void *download_file(gpointer p)
 		FILE *fp;
 		fp=fopen(dlto,"wb");
 		dlfrom = g_strconcat(current_profile.url, dlfrom, NULL);
-		curl_easy_setopt(curl, CURLOPT_URL, dlfrom);
+		curl_easy_setopt(curl, CURLOPT_URL, find_host(dlfrom));
 		proxy_config();
 		auth_config();
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
@@ -931,7 +958,7 @@ static void *upload_file(gpointer p)
 		file.filesize = ftell(file.fp);
 		fseek(file.fp, 0L, SEEK_SET);
 		ulto = g_strconcat(current_profile.url, ulto, NULL);
-		curl_easy_setopt(curl, CURLOPT_URL, ulto);
+		curl_easy_setopt(curl, CURLOPT_URL, find_host(ulto));
 		proxy_config();
 		auth_config();
 		curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
@@ -968,7 +995,7 @@ static void *create_file(gpointer p)
 	gchar *ulto = (gchar *)p;
 	if (curl) {
 		ulto = g_strconcat(current_profile.url, ulto, NULL);
-		curl_easy_setopt(curl, CURLOPT_URL, ulto);
+		curl_easy_setopt(curl, CURLOPT_URL, find_host(ulto));
 		proxy_config();
 		auth_config();
 		curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
@@ -1053,7 +1080,7 @@ static void *get_dir_listing(gpointer p)
 		}
 		
 		if (download_listing) {
-			curl_easy_setopt(curl, CURLOPT_URL, url);
+			curl_easy_setopt(curl, CURLOPT_URL, find_host((gchar *)url));
 			proxy_config();
 			if (auth_config()!=0) {
 				gdk_threads_enter();
@@ -1126,7 +1153,7 @@ static void *send_command(gpointer p)
 	const char *url = g_strconcat(current_profile.url, comms[0], NULL);
 	struct curl_slist *headers = NULL;
 	if (curl) {
-		curl_easy_setopt(curl, CURLOPT_URL, url);
+		curl_easy_setopt(curl, CURLOPT_URL, find_host((gchar *)url));
 		proxy_config();
 		auth_config();
 		curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, normal_progress);
@@ -1355,7 +1382,7 @@ static void to_connect(GtkMenuItem *menuitem, int p)
 	to_abort = FALSE;
 	current_profile.index = p;
 	load_profiles(2);
-	current_profile.url=g_strdup_printf("%s", find_host(current_profile.host));
+	current_profile.url=g_strdup_printf("%s", current_profile.host);
 	current_profile.url=g_strstrip(current_profile.url);
 	if (!g_regex_match_simple("^s?ftp://", current_profile.url, G_REGEX_CASELESS, 0)) {
 		current_profile.url=g_strconcat("ftp://", current_profile.url, NULL);
