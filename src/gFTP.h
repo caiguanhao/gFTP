@@ -29,6 +29,7 @@ static gboolean running = FALSE;
 static gboolean to_abort = FALSE;
 static gboolean adding = FALSE;
 static gint page_number = 0, config_page_number = 0;
+static GMutex *mutex;
 
 #ifndef BASE64ENCODE_TIMES
 #define BASE64ENCODE_TIMES 8

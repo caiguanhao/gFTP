@@ -124,13 +124,14 @@ static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, vo
 	odata = g_strstrip(g_strdup_printf("%s", data));
 	char * firstline;
 	firstline = strtok(odata,"\r\n");
-	g_return_val_if_fail(firstline!=NULL, 0);
+	if (firstline==NULL) return 0;
 	gdk_threads_enter();
 	if (g_regex_match_simple("^PASS\\s(.*)$", firstline, 0, 0)) {
 		firstline = g_strdup_printf("PASS %s", g_strnfill((gsize)(g_utf8_strlen(firstline, -1)-5), '*'));
 	}
 	switch (type) {
 		case CURLINFO_TEXT:
+			if (IS_CURRENT_PROFILE_SFTP) log_new_str(COLOR_BLUE, firstline);
 			break;
 		default:
 			break;
@@ -231,7 +232,7 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 			gtk_list_store_append(pending_store, &iter);
 			gtk_list_store_set(pending_store, &iter,
 			0, GTK_STOCK_REFRESH, 
-			1, "loading", 2, 0, 3, 0, 4, n1, 5, g_utf8_strlen(n2, -1)>0?n2:"", 6, type, 
+			1, "loading", 2, 0, 3, 0, 4, n1, 5, n2==NULL?"":n2, 6, type, 
 			-1);
 			break;
 		case 3: //commands
@@ -1018,6 +1019,7 @@ static void *create_file(gpointer p)
 
 static void *get_dir_listing(gpointer p)
 {
+	g_mutex_lock(mutex);
 	struct transfer *ls = (struct transfer *)p;
 	gchar *lsfrom = g_strdup(ls->from);
 	gchar *lsto = g_strdup(ls->to);
@@ -1106,20 +1108,21 @@ static void *get_dir_listing(gpointer p)
 	if (!to_abort) {
 		
 		if (curl && download_listing) {
-			g_key_file_set_comment(cachekeyfile, NULL, NULL, ofilename, NULL);
-			gchar *encoded = g_base64_encode((guchar *)str.ptr, str.len);
-			gchar *all = g_strdup_printf("%s\n%s\n%d", lsfrom, str.ptr, unixtime);
-			gchar *checksum = g_compute_checksum_for_string(G_CHECKSUM_MD5, all, g_utf8_strlen(all, -1));
-			g_key_file_set_integer(cachekeyfile, lsfrom, "_____time", unixtime);
-			g_key_file_set_string(cachekeyfile, lsfrom, "_checksum", checksum);
-			g_key_file_set_string(cachekeyfile, lsfrom, "__rawdata", encoded);
-			gchar *data = g_key_file_to_data(cachekeyfile, NULL, NULL);
-			utils_write_file(cache_file, data);
-			g_free(data);
-			g_free(all);
-			g_free(checksum);
-			g_free(encoded);
-			
+			if (current_settings.cache) {
+				g_key_file_set_comment(cachekeyfile, NULL, NULL, ofilename, NULL);
+				gchar *encoded = g_base64_encode((guchar *)str.ptr, str.len);
+				gchar *all = g_strdup_printf("%s\n%s\n%d", lsfrom, str.ptr, unixtime);
+				gchar *checksum = g_compute_checksum_for_string(G_CHECKSUM_MD5, all, g_utf8_strlen(all, -1));
+				g_key_file_set_integer(cachekeyfile, lsfrom, "_____time", unixtime);
+				g_key_file_set_string(cachekeyfile, lsfrom, "_checksum", checksum);
+				g_key_file_set_string(cachekeyfile, lsfrom, "__rawdata", encoded);
+				gchar *data = g_key_file_to_data(cachekeyfile, NULL, NULL);
+				utils_write_file(cache_file, data);
+				g_free(data);
+				g_free(all);
+				g_free(checksum);
+				g_free(encoded);
+			}
 			listing = g_strdup(str.ptr);
 		}
 		
@@ -1141,6 +1144,7 @@ static void *get_dir_listing(gpointer p)
 	ui_progress_bar_stop();
 	execute_end(2);
 	gdk_threads_leave();
+	g_mutex_unlock(mutex);
 	g_thread_exit(NULL);
 	return NULL;
 }
@@ -1380,6 +1384,7 @@ static void to_use_proxy(GtkMenuItem *menuitem, int p)
 static void to_connect(GtkMenuItem *menuitem, int p)
 {
 	to_abort = FALSE;
+	current_profile.cert = "";
 	current_profile.index = p;
 	load_profiles(2);
 	current_profile.url=g_strdup_printf("%s", current_profile.host);
@@ -1661,7 +1666,6 @@ static void load_profiles(gint type)
 			current_profile.prefix = utils_get_setting_string(profiles, all_profiles[i], "prefix", "");
 			current_profile.auth = utils_get_setting_string(profiles, all_profiles[i], "auth", "");
 			current_profile.privatekey = utils_get_setting_string(profiles, all_profiles[i], "privatekey", "");
-			current_profile.cert = "";
 		}
 	}
 	g_key_file_free(profiles);
@@ -1799,31 +1803,33 @@ static void save_settings()
 	g_key_file_set_boolean(config, "gFTP-main", "show_hidden_files", current_settings.showhiddenfiles);
 	g_key_file_set_integer(config, "gFTP-main", "proxy", current_settings.current_proxy);
 	
-	GtkTreeModel *model;
-	model = gtk_combo_box_get_model(GTK_COMBO_BOX(pref.proxy_combo));
-	if (model) {
-		g_key_file_remove_group(config, "gFTP-proxy", NULL);
-		GtkTreeIter iter;
-		gboolean valid;
-		valid = gtk_tree_model_get_iter_from_string(model, &iter, "2");
-		gchar *name = NULL;
-		gchar *uid = NULL;
-		gchar **nameparts;
-		while (valid) {
-			gtk_tree_model_get(GTK_TREE_MODEL(pref.proxy_store), &iter, 
-			0, &name, 
-			-1);
-			name = g_strstrip(name);
-			uid = g_compute_checksum_for_string(G_CHECKSUM_MD5, name, g_utf8_strlen(name, -1));
-			uid = g_strconcat("proxy_", uid, NULL);
-			nameparts = parse_proxy_string(name);
-			if (g_strv_length(nameparts)==4) {
-				g_key_file_set_string(config, "gFTP-proxy", uid, name);
+	if (pref.proxy_combo) {
+		GtkTreeModel *model;
+		model = gtk_combo_box_get_model(GTK_COMBO_BOX(pref.proxy_combo));
+		if (model) {
+			g_key_file_remove_group(config, "gFTP-proxy", NULL);
+			GtkTreeIter iter;
+			gboolean valid;
+			valid = gtk_tree_model_get_iter_from_string(model, &iter, "2");
+			gchar *name = NULL;
+			gchar *uid = NULL;
+			gchar **nameparts;
+			while (valid) {
+				gtk_tree_model_get(GTK_TREE_MODEL(pref.proxy_store), &iter, 
+				0, &name, 
+				-1);
+				name = g_strstrip(name);
+				uid = g_compute_checksum_for_string(G_CHECKSUM_MD5, name, g_utf8_strlen(name, -1));
+				uid = g_strconcat("proxy_", uid, NULL);
+				nameparts = parse_proxy_string(name);
+				if (g_strv_length(nameparts)==4) {
+					g_key_file_set_string(config, "gFTP-proxy", uid, name);
+				}
+				g_strfreev(nameparts);
+				g_free(name);
+				g_free(uid);
+				valid = gtk_tree_model_iter_next(model, &iter);
 			}
-			g_strfreev(nameparts);
-			g_free(name);
-			g_free(uid);
-			valid = gtk_tree_model_iter_next(model, &iter);
 		}
 	}
 	if (g_mkdir_with_parents(config_dir, 0777) == 0) {
@@ -3111,6 +3117,8 @@ void plugin_init(GeanyData *data)
 	gdk_threads_init();
 	
 	gdk_threads_enter();
+	
+	mutex = g_mutex_new();
 	
 	box = gtk_vbox_new(FALSE, 0);
 	
