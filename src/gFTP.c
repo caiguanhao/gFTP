@@ -1265,63 +1265,64 @@ static void *to_create_file(gpointer p)
 
 static void execute()
 {
-	g_return_if_fail(running==FALSE);
-	running = TRUE;
-	gtk_widget_set_sensitive(toolbar.abort, TRUE);
-	gint type;
-	gchar *remote;
-	gchar *local;
-	if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pending_store), &current_pending)) {
-		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 
-		4, &remote, 5, &local, 6, &type, -1);
-		switch (type) {
-			case 0: {
-				struct transfer ul;
-				ul.from = g_strdup(local);
-				ul.to = g_strdup(remote);
-				to_upload_file(&ul);
-				break;
+	if (running==FALSE) {
+		running = TRUE;
+		gtk_widget_set_sensitive(toolbar.abort, TRUE);
+		gint type;
+		gchar *remote;
+		gchar *local;
+		if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pending_store), &current_pending)) {
+			gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 
+			4, &remote, 5, &local, 6, &type, -1);
+			switch (type) {
+				case 0: {
+					struct transfer ul;
+					ul.from = g_strdup(local);
+					ul.to = g_strdup(remote);
+					to_upload_file(&ul);
+					break;
+				}
+				case 1: {
+					struct transfer dl;
+					dl.from = g_strdup(remote);
+					dl.to = g_strdup(local);
+					to_download_file(&dl);
+					break;
+				}
+				case 2:
+				case 22:
+				case 222:
+				case 2222: {
+					struct transfer ls;
+					ls.from = g_strconcat(g_path_get_dirname(remote), "/", NULL);
+					ls.to = g_strdup(local);
+					if (type==222 || type==2222) ls.cache_enabled = TRUE;
+					to_get_dir_listing(&ls);
+					break;
+				}
+				case 3: {
+					gchar *comm;
+					comm = g_strconcat(remote, "\n", local, NULL);
+					to_send_commands(comm);
+					break;
+				}
+				case 55: {
+					gchar *cf;
+					cf = g_strconcat(remote, NULL);
+					to_create_file(cf);
+					break;
+				}
+				default: {
+					running = FALSE;
+					gtk_widget_set_sensitive(toolbar.abort, FALSE);
+				}
 			}
-			case 1: {
-				struct transfer dl;
-				dl.from = g_strdup(remote);
-				dl.to = g_strdup(local);
-				to_download_file(&dl);
-				break;
-			}
-			case 2:
-			case 22:
-			case 222:
-			case 2222: {
-				struct transfer ls;
-				ls.from = g_strconcat(g_path_get_dirname(remote), "/", NULL);
-				ls.to = g_strdup(local);
-				if (type==222 || type==2222) ls.cache_enabled = TRUE;
-				to_get_dir_listing(&ls);
-				break;
-			}
-			case 3: {
-				gchar *comm;
-				comm = g_strconcat(remote, "\n", local, NULL);
-				to_send_commands(comm);
-				break;
-			}
-			case 55: {
-				gchar *cf;
-				cf = g_strconcat(remote, NULL);
-				to_create_file(cf);
-				break;
-			}
-			default: {
-				running = FALSE;
-				gtk_widget_set_sensitive(toolbar.abort, FALSE);
-			}
+			gint i=0,y=0; //Used to stop an unknown error.
+			for(i=0; i<100000; i++){y+=1;}
 		}
-		gint i=0,y=0; //Used to stop an unknown error.
-		for(i=0; i<100000; i++){y+=1;}
+		g_free(remote);
+		g_free(local);
 	}
-	g_free(remote);
-	g_free(local);
 }
 
 static gboolean execute_wait(gpointer data)
