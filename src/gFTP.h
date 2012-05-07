@@ -107,6 +107,8 @@ static struct
 	GtkWidget *proxy_host;
 	GtkWidget *proxy_port;
 	
+	GtkWidget *autonav;
+	
 	GtkWidget *showhiddenfiles;
 	GtkWidget *notebook;
 } pref;
@@ -123,6 +125,7 @@ static struct
 	gboolean showhiddenfiles;
 	gint current_proxy;
 	gchar **proxy_profiles;
+	gboolean autonav;
 } current_settings;
 
 static struct 

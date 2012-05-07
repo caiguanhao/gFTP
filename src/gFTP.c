@@ -1099,8 +1099,12 @@ static void *get_dir_listing(gpointer p)
 			curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
 			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 			curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_SINGLECWD);
-			if (current_settings.showhiddenfiles)
-				curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "LIST -a");
+			if (current_settings.showhiddenfiles) {
+				if (IS_CURRENT_PROFILE_SFTP) 
+					curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "ls -a");
+				else
+					curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "LIST -a");
+			}
 			curl_easy_perform(curl);
 		}
 	}
@@ -1802,6 +1806,7 @@ static void save_settings()
 	
 	g_key_file_set_boolean(config, "gFTP-main", "cache", current_settings.cache);
 	g_key_file_set_boolean(config, "gFTP-main", "show_hidden_files", current_settings.showhiddenfiles);
+	g_key_file_set_boolean(config, "gFTP-main", "auto_nav", current_settings.autonav);
 	g_key_file_set_integer(config, "gFTP-main", "proxy", current_settings.current_proxy);
 	
 	if (pref.proxy_combo) {
@@ -1886,6 +1891,7 @@ static void load_settings(gint type)
 	g_key_file_load_from_file(settings, config_file, G_KEY_FILE_NONE, NULL);
 	current_settings.cache = utils_get_setting_boolean(settings, "gFTP-main", "cache", FALSE);
 	current_settings.showhiddenfiles = utils_get_setting_boolean(settings, "gFTP-main", "show_hidden_files", FALSE);
+	current_settings.autonav = utils_get_setting_boolean(settings, "gFTP-main", "auto_nav", FALSE);
 	if (!current_settings.current_proxy)
 		current_settings.current_proxy = utils_get_setting_integer(settings, "gFTP-main", "proxy", 0);
 	current_settings.proxy_profiles = g_key_file_get_keys(settings, "gFTP-proxy", NULL, NULL);
@@ -2143,7 +2149,10 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				gchar *cmd = NULL;
 				cmd = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Please input folder name:\n(to create multi-level folders,\nuse Create Blank File instead)", "New Folder");
 				if (cmd && g_utf8_strlen(cmd, -1)>0) {
-					add_pending_item(3, name, g_strdup_printf("MKD %s", cmd));
+					if (IS_CURRENT_PROFILE_SFTP)
+						add_pending_item(3, name, g_strdup_printf("mkdir /%s%s", name, cmd));
+					else
+						add_pending_item(3, name, g_strdup_printf("MKD %s", cmd));
 					if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 					g_free(cmd);
 				}
@@ -2156,7 +2165,10 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 						if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
 							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
 							if (dirname) {
-								add_pending_item(3, name, g_strdup_printf("RMD %s", dirname));
+								if (IS_CURRENT_PROFILE_SFTP)
+									add_pending_item(3, name, g_strdup_printf("rmdir /%s%s", name, dirname));
+								else
+									add_pending_item(3, name, g_strdup_printf("RMD %s", dirname));
 								if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 								g_free(dirname);
 							}
@@ -2189,7 +2201,10 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 						if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
 							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
 							if (dirname) {
-								add_pending_item(3, name, g_strdup_printf("DELE %s", dirname));
+								if (IS_CURRENT_PROFILE_SFTP)
+									add_pending_item(3, name, g_strdup_printf("rm /%s%s", name, dirname));
+								else
+									add_pending_item(3, name, g_strdup_printf("DELE %s", dirname));
 								if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 								g_free(dirname);
 							}
@@ -2208,7 +2223,10 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 							reto = dialogs_show_input("Rename To", GTK_WINDOW(geany->main_widgets->window), "Please input new folder name:", dirname);
 							if (reto && g_utf8_strlen(reto, -1)>0) {
 								if (g_strcmp0(reto, dirname)!=0) {
-									add_pending_item(3, name, g_strdup_printf("RNFR %s\nRNTO %s", dirname, reto));
+									if (IS_CURRENT_PROFILE_SFTP)
+										add_pending_item(3, name, g_strdup_printf("rename /%s%s /%s%s", name, dirname, name, reto));
+									else
+										add_pending_item(3, name, g_strdup_printf("RNFR %s\nRNTO %s", dirname, reto));
 									if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 								}
 								g_free(reto);
@@ -2271,17 +2289,37 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
 		gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_DIR, &name, -1);
 		if (is_folder_selected(list)) {
 			gtk_tree_model_get_iter(model, &parent, treepath);
-			add_pending_item(2222, name, NULL);
+			if (!p || current_settings.autonav) add_pending_item(2222, name, NULL);
 			if (p) {
 				gchar *remote = (gchar *)p;
 				gchar **remoteparts = g_strsplit(remote, "/", 0);
 				gint i;
 				remote = g_strdup("");
+				GtkTreeIter iter2;
 				for (i=0; i<g_strv_length(remoteparts); i++) {
 					if (g_strcmp0(remoteparts[i], "")!=0) {
 						remote = g_strconcat(remote, remoteparts[i], "/", NULL);
-						add_pending_item(2222, remote, remote);
+						if (current_settings.autonav) {
+							add_pending_item(2222, remote, remote);
+						} else {
+							gtk_tree_store_append(file_store, &iter2, &iter);
+							gtk_tree_store_set(file_store, &iter2,
+							FILEVIEW_COLUMN_ICON, GTK_STOCK_DIRECTORY,
+							FILEVIEW_COLUMN_NAME, remoteparts[i],
+							FILEVIEW_COLUMN_DIR, remote,
+							FILEVIEW_COLUMN_INFO, g_strdup_printf("/%s", remote), 
+							-1);
+							gtk_tree_model_get_iter(model, &iter, gtk_tree_model_get_path(model, &iter2));
+							gtk_tree_model_get_iter(model, &parent, gtk_tree_model_get_path(model, &iter));
+						}
 					}
+				}
+				if (!current_settings.autonav) {
+					gtk_tree_model_get_iter_first(GTK_TREE_MODEL(file_store), &iter);
+					gtk_tree_view_expand_row(GTK_TREE_VIEW(file_view), gtk_tree_model_get_path(GTK_TREE_MODEL(file_store), &iter), TRUE);
+					treepath = gtk_tree_model_get_path(GTK_TREE_MODEL(file_store), &parent);
+					gtk_tree_view_set_cursor(GTK_TREE_VIEW(file_view), treepath, NULL, FALSE);
+					add_pending_item(2222, remote, NULL);
 				}
 			}
 		} else {
@@ -2892,6 +2930,8 @@ static void on_configure_response(GtkDialog *dialog, gint response, gpointer use
 {
 	config_page_number = gtk_notebook_get_current_page(GTK_NOTEBOOK(pref.notebook));
 	if (response == GTK_RESPONSE_OK || response == GTK_RESPONSE_APPLY) {
+		current_settings.autonav = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.autonav));
+		
 		save_settings();
 		save_profiles(1);
 	}
@@ -3362,7 +3402,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_widget_show_all(hbox);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), table, hbox);
 	
-	table = gtk_table_new(2, 5, FALSE);
+	table = gtk_table_new(4, 5, FALSE);
 	
 	store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 	gtk_list_store_append(store, &iter);
@@ -3418,6 +3458,14 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_table_attach(GTK_TABLE(table), widget, 4, 5, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_proxy_profile_entry_changed), dialog);
 	pref.proxy_port = widget;
+	
+	widget = gtk_hseparator_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 4);
+	
+	widget = gtk_check_button_new_with_label("Auto-Navigate to Initial Remote Directory");
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), current_settings.autonav);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	pref.autonav = widget;
 	
 	load_settings(1);
 	
