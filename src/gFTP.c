@@ -93,7 +93,7 @@ static void msgwin_scroll_to_bottom()
 	gtk_tree_view_scroll_to_cell(MsgWin, path, NULL, FALSE, 0.0, 0.0);
 }
 
-static void log_new_str(int color, char *text)
+static void log_new_str(gint color, gchar *text)
 {
 	GTimeVal ct;
 	g_get_current_time(&ct);
@@ -117,12 +117,12 @@ static void fileview_scroll_to_iter(GtkTreeIter *iter)
 	gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(file_view), path, NULL, TRUE, 0.0, 0.0);
 }
 
-static int ftp_log(CURL *handle, curl_infotype type, char *data, size_t size, void *userp)
+static int ftp_log(CURL *handle, curl_infotype type, gchar *data, size_t size, void *userp)
 {
 	if (to_abort) return 0;
-	char * odata;
+	gchar *odata;
 	odata = g_strstrip(g_strdup_printf("%s", data));
-	char * firstline;
+	gchar *firstline;
 	firstline = strtok(odata,"\r\n");
 	if (firstline==NULL) return 0;
 	gdk_threads_enter();
@@ -285,7 +285,7 @@ static int add_item(gpointer data, gboolean is_dir)
 	}
 	gint64 size = g_ascii_strtoll(parts[1], NULL, 0);
 	gchar *tsize = g_format_size_for_display(size);
-	char buffer[80];
+	gchar buffer[80];
 	time_t mod_time = g_ascii_strtoll(parts[2], NULL, 0);
 	strftime(buffer, 80, "%Y-%m-%d %H:%M:%S (%A)", gmtime(&mod_time));
 	gtk_tree_store_set(file_store, &iter,
@@ -307,6 +307,7 @@ static int file_cmp(gconstpointer a, gconstpointer b)
 
 static gboolean redefine_parent_iter(gchar *src, gboolean strict_mode)
 {
+	if (g_strcmp0(src, NULL)==0) return TRUE; //bug fixed in some machine
 	GtkTreeIter parent_iter;
 	GtkTreeIter iter;
 	gboolean valid;
@@ -366,19 +367,19 @@ static void clear()
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
 }
 
-static int to_list(const char *listdata)
+static int to_list(const gchar *listdata)
 {
 	if (to_abort) return 1;
 	if (strlen(listdata)==0) return 1;
-	char * odata;
+	gchar *odata;
 	odata = g_strdup_printf("%s", listdata);
-	char *pch;
+	gchar *pch;
 	pch = strtok(odata, "\r\n");
 	struct ftpparse ftp;
 	while (pch != NULL)
 	{
 		if (ftp_parse(&ftp, pch, strlen(pch))) {
-			char *fileinfo;
+			gchar *fileinfo;
 			fileinfo = g_strdup_printf("%s\n%ld\n%lu", ftp.name, ftp.size, (unsigned long)ftp.mtime);
 			switch (ftp.flagtrycwd){
 				case 1:
@@ -1033,7 +1034,7 @@ static void *get_dir_listing(gpointer p)
 		else
 			auto_scroll = TRUE;
 	}
-	const char *url = g_strconcat(current_profile.url, lsfrom, NULL);
+	const gchar *url = g_strconcat(current_profile.url, lsfrom, NULL);
 	struct string str;
 	str.len = 0;
 	str.ptr = malloc(1);
@@ -1158,7 +1159,7 @@ static void *send_command(gpointer p)
 	gchar *comm = (gchar *)p;
 	gchar **comms = g_strsplit(comm, "\n", 0);
 	gint i;
-	const char *url = g_strconcat(current_profile.url, comms[0], NULL);
+	const gchar *url = g_strconcat(current_profile.url, comms[0], NULL);
 	struct curl_slist *headers = NULL;
 	if (curl) {
 		curl_easy_setopt(curl, CURLOPT_URL, find_host((gchar *)url));
@@ -1892,7 +1893,7 @@ static void load_settings(gint type)
 	current_settings.cache = utils_get_setting_boolean(settings, "gFTP-main", "cache", FALSE);
 	current_settings.showhiddenfiles = utils_get_setting_boolean(settings, "gFTP-main", "show_hidden_files", FALSE);
 	current_settings.autonav = utils_get_setting_boolean(settings, "gFTP-main", "auto_nav", FALSE);
-	if (!current_settings.current_proxy)
+	if (current_settings.current_proxy == -1)
 		current_settings.current_proxy = utils_get_setting_integer(settings, "gFTP-main", "proxy", 0);
 	current_settings.proxy_profiles = g_key_file_get_keys(settings, "gFTP-proxy", NULL, NULL);
 	switch (type) {
@@ -1931,7 +1932,7 @@ static void load_settings(gint type)
 	
 	load_profiles(0);
 	load_hosts();
-	tmp_dir = g_strdup_printf("%s/gFTP/",(char *)g_get_tmp_dir());
+	tmp_dir = g_strdup_printf("%s/gFTP/",(gchar *)g_get_tmp_dir());
 }
 
 static gboolean is_single_selection(GtkTreeSelection *treesel)
@@ -1965,12 +1966,12 @@ static gboolean is_folder_selected(GList *selected_items)
 	return dir_found;
 }
 
-static gboolean is_edit_profiles_selected_nth_item(GtkTreeIter *iter, char *num)
+static gboolean is_edit_profiles_selected_nth_item(GtkTreeIter *iter, gchar *num)
 {
 	return gtk_tree_path_compare(gtk_tree_path_new_from_string(gtk_tree_model_get_string_from_iter(GTK_TREE_MODEL(pref.store), iter)), gtk_tree_path_new_from_string(num))==0;
 }
 
-static gboolean is_edit_profiles_selected_nth_item_proxy(GtkTreeIter *iter, char *num)
+static gboolean is_edit_profiles_selected_nth_item_proxy(GtkTreeIter *iter, gchar *num)
 {
 	return gtk_tree_path_compare(gtk_tree_path_new_from_string(gtk_tree_model_get_string_from_iter(GTK_TREE_MODEL(pref.proxy_store), iter)), gtk_tree_path_new_from_string(num))==0;
 }
@@ -3199,6 +3200,7 @@ void plugin_init(GeanyData *data)
 	
 	gtk_box_pack_start(GTK_BOX(box), vpaned, TRUE, TRUE, 0);
 	
+	current_settings.current_proxy = -1;
 	load_settings(2);
 	
 	gtk_widget_show_all(box);
