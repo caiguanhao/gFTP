@@ -119,19 +119,23 @@ static void fileview_scroll_to_iter(GtkTreeIter *iter)
 
 static int ftp_log(CURL *handle, curl_infotype type, gchar *data, size_t size, void *userp)
 {
+	gchar *hideregex = (gchar *)userp; // regex to ignore some logs
 	if (to_abort) return 0;
 	gchar *odata;
 	odata = g_strstrip(g_strdup_printf("%s", data));
 	gchar *firstline;
 	firstline = strtok(odata,"\r\n");
 	if (firstline==NULL) return 0;
+	if (hideregex && g_utf8_strlen(hideregex, -1)>0 && g_regex_match_simple(hideregex, firstline, G_REGEX_CASELESS, 0))
+		return 0;
 	gdk_threads_enter();
 	if (g_regex_match_simple("^PASS\\s(.*)$", firstline, 0, 0)) {
 		firstline = g_strdup_printf("PASS %s", g_strnfill((gsize)(g_utf8_strlen(firstline, -1)-5), '*'));
 	}
 	switch (type) {
 		case CURLINFO_TEXT:
-			if (IS_CURRENT_PROFILE_SFTP) log_new_str(COLOR_BLUE, firstline);
+			if (IS_CURRENT_PROFILE_SFTP) 
+				log_new_str(g_regex_match_simple("error|fail", firstline, G_REGEX_CASELESS, 0)?COLOR_RED:COLOR_BLUE, firstline);
 			break;
 		default:
 			break;
@@ -143,7 +147,7 @@ static int ftp_log(CURL *handle, curl_infotype type, gchar *data, size_t size, v
 		case CURLINFO_SSL_DATA_OUT:
 			break;
 		case CURLINFO_HEADER_IN:
-			log_new_str(COLOR_BLACK, firstline);
+			log_new_str(g_regex_match_simple("^5\\d{2}", firstline, G_REGEX_CASELESS, 0)?COLOR_RED:COLOR_BLACK, firstline);
 			break;
 		case CURLINFO_DATA_IN:
 			break;
@@ -258,6 +262,8 @@ static int add_item(gpointer data, gboolean is_dir)
 	gchar **parts=g_regex_split_simple("\n", data, 0, 0);
 	gboolean valid = gtk_tree_store_iter_is_valid(file_store, &parent);
 	if (strcmp(parts[0],".")==0||strcmp(parts[0],"..")==0) return 1;
+	if (!current_settings.showhiddenfiles && IS_CURRENT_PROFILE_SFTP && g_str_has_prefix(parts[0], ".")) 
+		return 1; // some SFTP server always shows the hidden files.
 	GtkTreeIter iter;
 	gtk_tree_store_append(file_store, &iter, valid?&parent:NULL);
 	if (is_dir) {
@@ -346,6 +352,19 @@ static gboolean redefine_parent_iter(gchar *src, gboolean strict_mode)
 		}
 	}
 	return FALSE;
+}
+
+static void last_tree_view_pos(gboolean newpos)
+{
+	gdk_threads_enter();
+	if (newpos) {
+		GdkRectangle rect;
+		gtk_tree_view_get_visible_rect(GTK_TREE_VIEW(file_view), &rect);
+		last_file_view_y = rect.y;
+	} else {
+		gtk_tree_view_scroll_to_point(GTK_TREE_VIEW(file_view), -1, last_file_view_y);
+	}
+	gdk_threads_leave();
 }
 
 static void clear_children()
@@ -1009,7 +1028,12 @@ static void *create_file(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
 		curl_easy_setopt(curl, CURLOPT_FTP_CREATE_MISSING_DIRS, 1L);
 		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
-		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
+		/* use create_file to create folders recursively (instead of MKD or mkdir) 
+		 * may cause these pointless errors:
+		 * > Creating the dir/file failed: Operation failed
+		 * > Error in the SSH layer
+		 * so we use regex to hide these errors. */
+		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, "dir/file|ssh\\slayer");
 		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 		curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_SINGLECWD);
 		curl_easy_perform(curl);
@@ -1136,9 +1160,10 @@ static void *get_dir_listing(gpointer p)
 			}
 			listing = g_strdup(str.ptr);
 		}
-		
+		last_tree_view_pos(TRUE);
 		clear_children();
 		if (to_list(listing, lsfrom)==0) {
+			last_tree_view_pos(FALSE);
 			gdk_threads_enter();
 			gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(toolbar.connect), GTK_STOCK_DISCONNECT);
 			if (auto_scroll) fileview_scroll_to_iter(&parent);
@@ -2111,6 +2136,14 @@ static gchar *return_web_url(gchar *name, gboolean is_dir)
 	return g_strdup_printf("%s%s", url, rel);
 }
 
+static gchar *quote_add_slash(gchar *src)
+{
+	GRegex *regex = g_regex_new("\"", 0, 0, NULL);
+	src = g_regex_replace_literal(regex, src, -1, 0, "\\\"", 0, NULL);
+	g_regex_unref(regex);
+	return src;
+}
+
 static gboolean on_abort_check_aborted(gpointer user_data)
 {
 	if (gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pending_store), NULL)==0) {
@@ -2147,23 +2180,6 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 		gtk_tree_model_get_iter(model, &iter, treepath);
 		gchar *name;
 		switch (type) {
-			case 1:
-				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
-				if (!is_folder_selected(list)) {
-					name = g_path_get_dirname(name);
-				}
-				if (g_strcmp0(name, ".")==0) name = "";
-				gchar *cmd = NULL;
-				cmd = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Please input folder name:\n(to create multi-level folders,\nuse Create Blank File instead)", "New Folder");
-				if (cmd && g_utf8_strlen(cmd, -1)>0) {
-					if (IS_CURRENT_PROFILE_SFTP)
-						add_pending_item(3, name, g_strdup_printf("mkdir /%s%s", name, cmd));
-					else
-						add_pending_item(3, name, g_strdup_printf("MKD %s", cmd));
-					if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
-					g_free(cmd);
-				}
-				break;
 			case 2:
 				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
 					if (is_folder_selected(list)) {
@@ -2173,7 +2189,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
 							if (dirname) {
 								if (IS_CURRENT_PROFILE_SFTP)
-									add_pending_item(3, name, g_strdup_printf("rmdir /%s%s", name, dirname));
+									add_pending_item(3, name, g_strdup_printf("rmdir \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname)));
 								else
 									add_pending_item(3, name, g_strdup_printf("RMD %s", dirname));
 								if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
@@ -2183,6 +2199,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 					}
 				}
 				break;
+			case 1: // the same function to create folders and files.
 			case 3:
 				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
 				if (!is_folder_selected(list)) {
@@ -2190,9 +2207,32 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				}
 				if (g_strcmp0(name, ".")==0) name = "";
 				gchar *filename = NULL;
-				filename = dialogs_show_input("Create Blank File", GTK_WINDOW(geany->main_widgets->window), "Please input file name:\n(recursively create missing folders,\neg. multi/level/folder.htm)", "New File");
+				if (type==1)
+					filename = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Please input folder name:\n(recursively create missing folders,\neg. new/multi/level/folder)", "New Folder");
+				if (type==3)
+					filename = dialogs_show_input("Create Blank File", GTK_WINDOW(geany->main_widgets->window), "Please input file name:\n(recursively create missing folders,\neg. multi/level/folder.htm)", "New File");
 				gchar *filepath;
 				if (filename && g_utf8_strlen(filename, -1)>0) {
+					if (type==1) // to create folder, add a '/' suffix
+						filename = g_strconcat(filename, "/", NULL);
+					if (!IS_CURRENT_PROFILE_SFTP) { // in non-SFTP mode, curl only creates 1-lvl missing dir.
+						gchar **parts = g_strsplit(filename, "/", 0);
+						if (g_strv_length(parts)>2) {
+							gchar *ap = "";
+							gint i;
+							/* Don't put all MKD commands in one request:
+							 * e.g. add_pending_item(3, name, "MKD a\nMKD a/b\nMKD a/b/c")
+							 * as it would not continue if any parent folder (a. a/b) exists. */
+							for (i=0; i<g_strv_length(parts)-1; i++) {
+								if (g_utf8_strlen(parts[i], -1)>0) {
+									if (i>0) ap = g_strconcat(ap, "/", NULL);
+									ap = g_strconcat(ap, parts[i], NULL);
+									add_pending_item(3, name, g_strdup_printf("MKD %s", ap));
+								}
+							}
+						}
+						g_strfreev(parts);
+					}
 					filepath = g_strdup_printf("%s%s", name, filename);
 					add_pending_item(55, filepath, "");
 					if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
@@ -2209,7 +2249,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
 							if (dirname) {
 								if (IS_CURRENT_PROFILE_SFTP)
-									add_pending_item(3, name, g_strdup_printf("rm /%s%s", name, dirname));
+									add_pending_item(3, name, g_strdup_printf("rm \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname)));
 								else
 									add_pending_item(3, name, g_strdup_printf("DELE %s", dirname));
 								if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
@@ -2231,7 +2271,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 							if (reto && g_utf8_strlen(reto, -1)>0) {
 								if (g_strcmp0(reto, dirname)!=0) {
 									if (IS_CURRENT_PROFILE_SFTP)
-										add_pending_item(3, name, g_strdup_printf("rename /%s%s /%s%s", name, dirname, name, reto));
+										add_pending_item(3, name, g_strdup_printf("rename \"/%s%s\" \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname), quote_add_slash(name), quote_add_slash(reto)));
 									else
 										add_pending_item(3, name, g_strdup_printf("RNFR %s\nRNTO %s", dirname, reto));
 									if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
