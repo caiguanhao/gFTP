@@ -256,9 +256,10 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 static int add_item(gpointer data, gboolean is_dir)
 {
 	gchar **parts=g_regex_split_simple("\n", data, 0, 0);
+	gboolean valid = gtk_tree_store_iter_is_valid(file_store, &parent);
 	if (strcmp(parts[0],".")==0||strcmp(parts[0],"..")==0) return 1;
 	GtkTreeIter iter;
-	gtk_tree_store_append(file_store, &iter, gtk_tree_store_iter_is_valid(file_store, &parent)?&parent:NULL);
+	gtk_tree_store_append(file_store, &iter, valid?&parent:NULL);
 	if (is_dir) {
 		GRegex *regex;
 		regex = g_regex_new("\\s->\\s", 0, 0, NULL);
@@ -276,7 +277,7 @@ static int add_item(gpointer data, gboolean is_dir)
 		}
 	}
 	gchar *parent_dir, *filename;
-	if (gtk_tree_store_iter_is_valid(file_store, &parent)) {
+	if (valid) {
 		gtk_tree_model_get(GTK_TREE_MODEL(file_store), &parent, FILEVIEW_COLUMN_DIR, &parent_dir, -1);
 		filename = g_strconcat(parent_dir, parts[0], is_dir?"/":"", NULL);
 		g_free(parent_dir);
@@ -367,11 +368,13 @@ static void clear()
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
 }
 
-static int to_list(const gchar *listdata)
+static int to_list(const gchar *listdata, const gchar *lsf)
 {
 	if (to_abort) return 1;
 	if (strlen(listdata)==0) return 1;
 	gchar *odata;
+	gtk_tree_model_get(GTK_TREE_MODEL(file_store), &parent, FILEVIEW_COLUMN_DIR, &odata, -1);
+	if (g_strcmp0(lsf, "./")!=0 && g_strcmp0(lsf, odata)!=0) return 1;
 	odata = g_strdup_printf("%s", listdata);
 	gchar *pch;
 	pch = strtok(odata, "\r\n");
@@ -949,13 +952,13 @@ static void *download_file(gpointer p)
 static void *upload_file(gpointer p)
 {
 	struct transfer *ul = (struct transfer *)p;
-	gchar *ulto = g_strdup(ul->to);
-	gchar *ulfrom = g_strdup(ul->from);
+	gchar *ulto = ul->to;
+	gchar *ulfrom = ul->from;
 	struct uploadf file;
 	g_get_current_time(&file.prev_t);
 	if (curl) {
 		file.transfered=0;
-		file.fp=fopen(ulfrom,"rb");
+		if (!(file.fp=fopen(ulfrom,"rb"))) goto end;
 		fseek(file.fp, 0L, SEEK_END);
 		file.filesize = ftell(file.fp);
 		fseek(file.fp, 0L, SEEK_SET);
@@ -982,6 +985,9 @@ static void *upload_file(gpointer p)
 		curl_easy_getinfo(curl, CURLINFO_SPEED_UPLOAD, &val);
 		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Average upload speed: %s/s.", g_format_size_for_display(val)));
 	}
+	gdk_threads_leave();
+	end:
+	gdk_threads_enter();
 	gtk_widget_hide(geany->main_widgets->progressbar);
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
 	g_free(ulto);
@@ -1132,7 +1138,7 @@ static void *get_dir_listing(gpointer p)
 		}
 		
 		clear_children();
-		if (to_list(listing)==0) {
+		if (to_list(listing, lsfrom)==0) {
 			gdk_threads_enter();
 			gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(toolbar.connect), GTK_STOCK_DISCONNECT);
 			if (auto_scroll) fileview_scroll_to_iter(&parent);
