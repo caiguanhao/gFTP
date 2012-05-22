@@ -126,6 +126,7 @@ static int ftp_log(CURL *handle, curl_infotype type, gchar *data, size_t size, v
 	gchar *firstline;
 	firstline = strtok(odata,"\r\n");
 	if (firstline==NULL) return 0;
+	if (!g_utf8_validate(firstline, -1, NULL)) return 0;
 	if (hideregex && g_utf8_strlen(hideregex, -1)>0 && g_regex_match_simple(hideregex, firstline, G_REGEX_CASELESS, 0))
 		return 0;
 	gdk_threads_enter();
@@ -387,15 +388,15 @@ static void clear()
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
 }
 
-static int to_list(const gchar *listdata, const gchar *lsf)
+static int to_list(const gchar *listdata, gchar *lsf)
 {
-	if (to_abort) return 1;
-	if (strlen(listdata)==0) return 1;
+	if (to_abort) return 2;
+	if (g_utf8_strlen(listdata, -1)==0) return 2;
 	GList *filelist;
 	GList *dirlist;
 	gchar *odata;
 	gtk_tree_model_get(GTK_TREE_MODEL(file_store), &parent, FILEVIEW_COLUMN_DIR, &odata, -1);
-	if (g_strcmp0(lsf, "./")!=0 && g_strcmp0(lsf, odata)!=0) return 1;
+	if (g_utf8_strlen(lsf, -1)>0 && g_strcmp0(lsf, "./")!=0 && g_strcmp0(lsf, odata)!=0) return 2;
 	odata = g_strdup_printf("%s", listdata);
 	gchar *pch;
 	pch = strtok(odata, "\r\n");
@@ -415,7 +416,7 @@ static int to_list(const gchar *listdata, const gchar *lsf)
 		}
 		pch = strtok(NULL, "\r\n");
 	}
-	if (g_list_length(dirlist)+g_list_length(filelist)==0) return 1;
+	if (g_list_length(dirlist)==0 && g_list_length(filelist)==0) return 1;
 	dirlist = g_list_sort(dirlist, (GCompareFunc)file_cmp);
 	filelist = g_list_sort(filelist, (GCompareFunc)file_cmp);
 	g_list_foreach(dirlist, (GFunc)add_item, (gpointer)TRUE);
@@ -1054,8 +1055,8 @@ static void *get_dir_listing(gpointer p)
 {
 	g_mutex_lock(mutex);
 	struct transfer *ls = (struct transfer *)p;
-	gchar *lsfrom = g_strdup(ls->from);
-	gchar *lsto = g_strdup(ls->to);
+	gchar *lsfrom = ls->from;
+	gchar *lsto = ls->to;
 	gboolean cache_enabled = FALSE;
 	gboolean auto_scroll = FALSE;
 	gboolean download_listing = TRUE;
@@ -1129,7 +1130,7 @@ static void *get_dir_listing(gpointer p)
 			curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
 			curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 			curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
-			curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
+			curl_easy_setopt(curl, CURLOPT_DEBUGDATA, "^226");
 			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 			curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_SINGLECWD);
 			if (current_settings.showhiddenfiles) {
@@ -1163,13 +1164,17 @@ static void *get_dir_listing(gpointer p)
 		}
 		last_tree_view_pos(TRUE);
 		clear_children();
-		if (to_list(listing, lsfrom)==0) {
+		gchar *lsf;
+		int to_list_return;
+		lsf = g_strdup_printf("%s", lsfrom);
+		to_list_return = to_list(listing, lsf);
+		if (to_list_return==0) {
 			last_tree_view_pos(FALSE);
 			gdk_threads_enter();
 			gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(toolbar.connect), GTK_STOCK_DISCONNECT);
 			if (auto_scroll) fileview_scroll_to_iter(&parent);
 			gdk_threads_leave();
-		} else {
+		} else if (to_list_return==1 && g_utf8_strlen(listing, -1)>0) {
 			gdk_threads_enter();
 			gchar *tmp_lst_file;
 			tmp_lst_file = g_strconcat(tmp_dir, "/", current_profile.login, "@", current_profile.host, NULL);
@@ -1186,14 +1191,13 @@ static void *get_dir_listing(gpointer p)
 			g_free(tmp_lst_file);
 			gdk_threads_leave();
 		}
+		g_free(lsf);
 	}
 	free(str.ptr);
 	end:
 	gdk_threads_enter();
 	// don't g_free(listing) / g_free(ofilename) / g_key_file_free(cachekeyfile)
 	// as it will cause crash after try_another_username_password();
-	g_free(lsfrom);
-	g_free(lsto);
 	ui_progress_bar_stop();
 	execute_end(2);
 	gdk_threads_leave();
@@ -1505,6 +1509,13 @@ static GtkWidget *create_popup_menu(void)
 	item = gtk_menu_item_new_with_mnemonic("_View on the Web");
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)999);
+	
+	item = gtk_separator_menu_item_new();
+	gtk_container_add(GTK_CONTAINER(menu), item);
+	
+	item = gtk_menu_item_new_with_mnemonic("_Refresh");
+	gtk_container_add(GTK_CONTAINER(menu), item);
+	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)88);
 	
 	item = gtk_separator_menu_item_new();
 	gtk_container_add(GTK_CONTAINER(menu), item);
@@ -2334,6 +2345,14 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 					}
 				}
 				break;
+			case 88: // refresh
+				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+				if (!is_folder_selected(list)) {
+					name = g_path_get_dirname(name);
+				}
+				if (g_strcmp0(name, ".")==0) name = "";
+				if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
+				break;
 			case 99:
 				current_settings.showhiddenfiles = gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(menuitem));
 				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
@@ -2387,7 +2406,11 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
 		gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_DIR, &name, -1);
 		if (is_folder_selected(list)) {
 			gtk_tree_model_get_iter(model, &parent, treepath);
-			if (!p || current_settings.autonav) add_pending_item(2222, name, NULL);
+			if (!p || current_settings.autonav) {
+				/* double click an expanded folder will do a force-refresh */
+				gboolean expanded = gtk_tree_view_row_expanded(GTK_TREE_VIEW(file_view), gtk_tree_model_get_path(GTK_TREE_MODEL(file_store), &iter));
+				add_pending_item(expanded?22:2222, name, NULL);
+			}
 			if (p) {
 				gchar *remote = (gchar *)p;
 				gchar **remoteparts = g_strsplit(remote, "/", 0);
