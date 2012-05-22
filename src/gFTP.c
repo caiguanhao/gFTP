@@ -391,6 +391,8 @@ static int to_list(const gchar *listdata, const gchar *lsf)
 {
 	if (to_abort) return 1;
 	if (strlen(listdata)==0) return 1;
+	GList *filelist;
+	GList *dirlist;
 	gchar *odata;
 	gtk_tree_model_get(GTK_TREE_MODEL(file_store), &parent, FILEVIEW_COLUMN_DIR, &odata, -1);
 	if (g_strcmp0(lsf, "./")!=0 && g_strcmp0(lsf, odata)!=0) return 1;
@@ -413,6 +415,7 @@ static int to_list(const gchar *listdata, const gchar *lsf)
 		}
 		pch = strtok(NULL, "\r\n");
 	}
+	if (g_list_length(dirlist)+g_list_length(filelist)==0) return 1;
 	dirlist = g_list_sort(dirlist, (GCompareFunc)file_cmp);
 	filelist = g_list_sort(filelist, (GCompareFunc)file_cmp);
 	g_list_foreach(dirlist, (GFunc)add_item, (gpointer)TRUE);
@@ -536,6 +539,7 @@ static gboolean port_config(gchar *str_port)
 
 static gboolean proxy_config()
 {
+	load_settings(2);
 	if (current_settings.current_proxy>0) {
 		gchar *name;
 		gchar **nameparts;
@@ -1141,7 +1145,6 @@ static void *get_dir_listing(gpointer p)
 	}
 	
 	if (!to_abort) {
-		
 		if (curl && download_listing) {
 			if (current_settings.cache) {
 				g_key_file_set_comment(cachekeyfile, NULL, NULL, ofilename, NULL);
@@ -1167,6 +1170,22 @@ static void *get_dir_listing(gpointer p)
 			gdk_threads_enter();
 			gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(toolbar.connect), GTK_STOCK_DISCONNECT);
 			if (auto_scroll) fileview_scroll_to_iter(&parent);
+			gdk_threads_leave();
+		} else {
+			gdk_threads_enter();
+			gchar *tmp_lst_file;
+			tmp_lst_file = g_strconcat(tmp_dir, "/", current_profile.login, "@", current_profile.host, NULL);
+			g_mkdir_with_parents(tmp_lst_file, 0777);
+			tmp_lst_file = g_strconcat(tmp_lst_file, "/", g_compute_checksum_for_string(G_CHECKSUM_SHA1, listing, -1), NULL);
+			g_file_set_contents(tmp_lst_file, listing, -1, NULL);
+			if (g_regex_match_simple("<(.|\n)*?>", listing, 0, 0) && dialogs_show_question("It seems that it was an HTML document. Open it with default application?")) {
+				GError* error = NULL;
+				gchar *argv[] = {"xdg-open", tmp_lst_file, NULL};
+				g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error);
+			} else {
+				document_open_file(tmp_lst_file, FALSE, NULL, NULL);
+			}
+			g_free(tmp_lst_file);
 			gdk_threads_leave();
 		}
 	}
@@ -1717,13 +1736,23 @@ static void select_profile(gint index)
 	}
 }
 
+static void select_proxy_profile(gint index)
+{
+	GtkTreeIter iter;
+	if (index>0 && gtk_tree_model_iter_nth_child(GTK_TREE_MODEL(pref.proxy_store), &iter, NULL, index+1)) {
+		gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.proxy_combo), &iter);
+		on_edit_proxy_profiles_changed();
+	}
+}
+
 static void save_profiles(gint type)
 {
 	GKeyFile *profiles = g_key_file_new();
 	gchar *data;
 	gchar *profiles_dir = g_path_get_dirname(profiles_file);
 	switch (type) {
-		case 1: {
+		case 1:
+		if (pref.combo) {
 			GtkTreeModel *model;
 			model = gtk_combo_box_get_model(GTK_COMBO_BOX(pref.combo));
 			GtkTreeIter iter;
@@ -1797,8 +1826,8 @@ static void save_profiles(gint type)
 				g_free(host);
 				valid = gtk_tree_model_iter_next(model, &iter);
 			}
-			break;
 		}
+		break;
 		case 2: {
 			g_key_file_load_from_file(profiles, profiles_file, G_KEY_FILE_NONE, NULL);
 			gint i;
@@ -1839,9 +1868,10 @@ static void save_settings()
 	g_key_file_set_boolean(config, "gFTP-main", "cache", current_settings.cache);
 	g_key_file_set_boolean(config, "gFTP-main", "show_hidden_files", current_settings.showhiddenfiles);
 	g_key_file_set_boolean(config, "gFTP-main", "auto_nav", current_settings.autonav);
+	g_key_file_set_boolean(config, "gFTP-main", "auto_reload", current_settings.autoreload);
 	g_key_file_set_integer(config, "gFTP-main", "proxy", current_settings.current_proxy);
 	
-	if (pref.proxy_combo) {
+	if (G_IS_OBJECT(pref.proxy_combo)) {
 		GtkTreeModel *model;
 		model = gtk_combo_box_get_model(GTK_COMBO_BOX(pref.proxy_combo));
 		if (model) {
@@ -1924,6 +1954,7 @@ static void load_settings(gint type)
 	current_settings.cache = utils_get_setting_boolean(settings, "gFTP-main", "cache", FALSE);
 	current_settings.showhiddenfiles = utils_get_setting_boolean(settings, "gFTP-main", "show_hidden_files", FALSE);
 	current_settings.autonav = utils_get_setting_boolean(settings, "gFTP-main", "auto_nav", FALSE);
+	current_settings.autoreload = utils_get_setting_boolean(settings, "gFTP-main", "auto_reload", TRUE);
 	if (current_settings.current_proxy == -1)
 		current_settings.current_proxy = utils_get_setting_integer(settings, "gFTP-main", "proxy", 0);
 	current_settings.proxy_profiles = g_key_file_get_keys(settings, "gFTP-proxy", NULL, NULL);
@@ -1999,11 +2030,13 @@ static gboolean is_folder_selected(GList *selected_items)
 
 static gboolean is_edit_profiles_selected_nth_item(GtkTreeIter *iter, gchar *num)
 {
+	if (!iter || !gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.store), iter)) return FALSE;
 	return gtk_tree_path_compare(gtk_tree_path_new_from_string(gtk_tree_model_get_string_from_iter(GTK_TREE_MODEL(pref.store), iter)), gtk_tree_path_new_from_string(num))==0;
 }
 
 static gboolean is_edit_profiles_selected_nth_item_proxy(GtkTreeIter *iter, gchar *num)
 {
+	if (!iter || !gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.proxy_store), iter)) return FALSE;
 	return gtk_tree_path_compare(gtk_tree_path_new_from_string(gtk_tree_model_get_string_from_iter(GTK_TREE_MODEL(pref.proxy_store), iter)), gtk_tree_path_new_from_string(num))==0;
 }
 
@@ -2065,8 +2098,11 @@ static gchar **parse_proxy_string(gchar *name)
 	gchar **results;
 	GRegex *regex;
 	GMatchInfo *match_info;
-	regex = g_regex_new("^(HTTP|SOCKS4|SOCKS5),\\s(.*):(.*)$", 0, 0, NULL);
-	g_regex_match(regex, name, 0, &match_info);
+	regex = g_regex_new("^(HTTP|SOCKS4|SOCKS5),\\s(.*):(\\d{1,5})$", 0, 0, NULL);
+	if (!g_regex_match(regex, name, 0, &match_info)) {
+		regex = g_regex_new("^(HTTP|SOCKS4|SOCKS5),\\s(.*)()$", 0, 0, NULL);
+		g_regex_match(regex, name, 0, &match_info);
+	}
 	results = g_match_info_fetch_all(match_info);
 	g_match_info_free(match_info);
 	g_regex_unref(regex);
@@ -2192,7 +2228,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 									add_pending_item(3, name, g_strdup_printf("rmdir \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname)));
 								else
 									add_pending_item(3, name, g_strdup_printf("RMD %s", dirname));
-								if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+								if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 								g_free(dirname);
 							}
 						}
@@ -2235,7 +2271,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 					}
 					filepath = g_strdup_printf("%s%s", name, filename);
 					add_pending_item(55, filepath, "");
-					if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+					if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 					g_free(filepath);
 					g_free(filename);
 				}
@@ -2252,7 +2288,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 									add_pending_item(3, name, g_strdup_printf("rm \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname)));
 								else
 									add_pending_item(3, name, g_strdup_printf("DELE %s", dirname));
-								if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+								if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 								g_free(dirname);
 							}
 						}
@@ -2274,7 +2310,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 										add_pending_item(3, name, g_strdup_printf("rename \"/%s%s\" \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname), quote_add_slash(name), quote_add_slash(reto)));
 									else
 										add_pending_item(3, name, g_strdup_printf("RNFR %s\nRNTO %s", dirname, reto));
-									if (redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+									if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 								}
 								g_free(reto);
 							}
@@ -2967,7 +3003,7 @@ static void on_document_save()
 		dst = g_file_get_relative_path(g_file_new_for_path(putdir), g_file_new_for_path(filepath));
 		if (dst) {
 			add_pending_item(0, dst, filepath);
-			if (redefine_parent_iter(dst, FALSE)) add_pending_item(22, dst, NULL);
+			if (current_settings.autoreload && redefine_parent_iter(dst, FALSE)) add_pending_item(22, dst, NULL);
 		}
 		g_free(putdir);
 	}
@@ -2978,6 +3014,7 @@ static void on_configure_response(GtkDialog *dialog, gint response, gpointer use
 	config_page_number = gtk_notebook_get_current_page(GTK_NOTEBOOK(pref.notebook));
 	if (response == GTK_RESPONSE_OK || response == GTK_RESPONSE_APPLY) {
 		current_settings.autonav = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.autonav));
+		current_settings.autoreload = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.autoreload));
 		
 		save_settings();
 		save_profiles(1);
@@ -3016,7 +3053,7 @@ static void on_window_drag_data_received(GtkWidget *widget, GdkDragContext *drag
 			add_pending_item(0, dst, filepath);
 			filename = strtok(NULL, "\r\n");
 		}
-		add_pending_item(22, dst, NULL);
+		if (current_settings.autoreload) add_pending_item(22, dst, NULL);
 		g_free(filenames);
 		g_free(filename);
 		success = TRUE;
@@ -3450,7 +3487,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_widget_show_all(hbox);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), table, hbox);
 	
-	table = gtk_table_new(4, 5, FALSE);
+	table = gtk_table_new(5, 5, FALSE);
 	
 	store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 	gtk_list_store_append(store, &iter);
@@ -3480,6 +3517,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	check_delete_button_sensitive_proxy(NULL);
 	
 	widget = gtk_combo_box_new_text();
+	gtk_widget_set_tooltip_text(widget, "Proxy type.");
 	gtk_combo_box_append_text(GTK_COMBO_BOX(widget), "HTTP");
 	gtk_combo_box_append_text(GTK_COMBO_BOX(widget), "SOCKS4");
 	gtk_combo_box_append_text(GTK_COMBO_BOX(widget), "SOCKS5");
@@ -3492,6 +3530,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
 	gtk_widget_set_size_request(widget, 100, -1);
+	gtk_widget_set_tooltip_text(widget, "You can provide username and password: <username>:<password>@<host>");
 	gtk_entry_set_max_length(GTK_ENTRY(widget), 255);
 	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_proxy_profile_entry_changed), dialog);
@@ -3501,6 +3540,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
 	gtk_table_attach(GTK_TABLE(table), widget, 3, 4, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
+	gtk_widget_set_tooltip_text(widget, "Port number for this proxy profile.");
 	gtk_widget_set_size_request(widget, 40, -1);
 	gtk_entry_set_max_length(GTK_ENTRY(widget), 5);
 	gtk_table_attach(GTK_TABLE(table), widget, 4, 5, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
@@ -3510,10 +3550,17 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	widget = gtk_hseparator_new();
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 4);
 	
-	widget = gtk_check_button_new_with_label("Auto-Navigate to Initial Remote Directory");
+	widget = gtk_check_button_new_with_label("Automatically navigate to initial remote directory");
+	gtk_widget_set_tooltip_text(widget, "Automatically open and load every folder in the path of initial remote directory, instead of just showing the last folder of that path.");
 	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), current_settings.autonav);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	pref.autonav = widget;
+	
+	widget = gtk_check_button_new_with_label("Automatically reload directory listing if changed");
+	gtk_widget_set_tooltip_text(widget, "Automatically reload directory listing when a file or folder has been changed. Uncheck this if you frequently edit and upload a file and don't need a directory listing update.");
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), current_settings.autoreload);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	pref.autoreload = widget;
 	
 	load_settings(1);
 	
@@ -3532,6 +3579,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	
 	if (curl) 
 		select_profile(current_profile.index);
+	select_proxy_profile(current_settings.current_proxy);
 	
 	switch (config_page_number) {
 		case 0:
@@ -3554,5 +3602,4 @@ void plugin_cleanup(void)
 	g_free(hosts_file);
 	g_free(tmp_dir);
 	g_strfreev(all_profiles);
-	gtk_widget_destroy(box);
 }

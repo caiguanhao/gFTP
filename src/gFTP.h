@@ -36,9 +36,6 @@ static GMutex *mutex;
 #define BASE64ENCODE_TIMES 8
 #endif
 
-GList *filelist;
-GList *dirlist;
-
 struct string
 {
 	char *ptr;
@@ -109,6 +106,7 @@ static struct
 	GtkWidget *proxy_port;
 	
 	GtkWidget *autonav;
+	GtkWidget *autoreload;
 	
 	GtkWidget *showhiddenfiles;
 	GtkWidget *notebook;
@@ -127,6 +125,7 @@ static struct
 	gint current_proxy;
 	gchar **proxy_profiles;
 	gboolean autonav;
+	gboolean autoreload;
 } current_settings;
 
 static struct 
@@ -157,8 +156,10 @@ static void execute_end(gint type);
 static void *disconnect(gpointer p);
 static void *to_get_dir_listing(gpointer p);
 static void load_profiles(gint type);
+static void load_settings(gint type);
 static gchar *load_profile_property(gint index, gchar *field);
 static void on_edit_profiles_changed(void);
+static void on_edit_proxy_profiles_changed(void);
 static void on_edit_preferences(GtkToolButton *toolbutton, gint page_num);
 static void on_open_clicked(GtkMenuItem *menuitem, gpointer p);
 static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data);
