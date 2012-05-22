@@ -539,7 +539,7 @@ static gboolean port_config(gchar *str_port)
 
 static gboolean proxy_config()
 {
-	load_settings(2);
+	load_proxy_profiles();
 	if (current_settings.current_proxy>0) {
 		gchar *name;
 		gchar **nameparts;
@@ -1013,8 +1013,6 @@ static void *upload_file(gpointer p)
 	gdk_threads_enter();
 	gtk_widget_hide(geany->main_widgets->progressbar);
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
-	g_free(ulto);
-	g_free(ulfrom);
 	execute_end(0);
 	gdk_threads_leave();
 	g_thread_exit(NULL);
@@ -1556,12 +1554,14 @@ static GtkWidget *create_popup_menu(void)
 	item = gtk_check_menu_item_new_with_mnemonic("Show _Hidden Files");
 	gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), current_settings.showhiddenfiles);
 	gtk_container_add(GTK_CONTAINER(menu), item);
-	g_signal_connect(item, "toggled", G_CALLBACK(on_menu_item_clicked), (gpointer)99);
+	popup.shf_handler_id = g_signal_connect(item, "toggled", G_CALLBACK(on_menu_item_clicked), (gpointer)99);
+	popup.shf = item;
 	
 	item = gtk_check_menu_item_new_with_mnemonic("_Cache Directory Listings");
 	gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), current_settings.cache);
 	gtk_container_add(GTK_CONTAINER(menu), item);
-	g_signal_connect(item, "toggled", G_CALLBACK(on_menu_item_clicked), (gpointer)100);
+	popup.cdl_handler_id = g_signal_connect(item, "toggled", G_CALLBACK(on_menu_item_clicked), (gpointer)100);
+	popup.cdl = item;
 	
 	gtk_widget_show_all(menu);
 	return menu;
@@ -1946,13 +1946,28 @@ static void load_hosts()
 	g_key_file_free(hosts);
 }
 
+static void load_proxy_profiles()
+{
+	if (config_file) {
+		GKeyFile *settings = g_key_file_new();
+		g_key_file_load_from_file(settings, config_file, G_KEY_FILE_NONE, NULL);
+		current_settings.proxy_profiles = g_key_file_get_keys(settings, "gFTP-proxy", NULL, NULL);
+		gint i;
+		for (i=0; i<g_strv_length(current_settings.proxy_profiles); i++) 
+			current_settings.proxy_profiles[i] = utils_get_setting_string(settings, "gFTP-proxy", current_settings.proxy_profiles[i], "");
+		g_key_file_free(settings);
+	}
+}
+
 static void load_settings(gint type)
 {
 	GKeyFile *settings = g_key_file_new();
 	config_file = g_strconcat(geany->app->configdir, G_DIR_SEPARATOR_S, "plugins", G_DIR_SEPARATOR_S, "gFTP", G_DIR_SEPARATOR_S, "settings.conf", NULL);
 	g_key_file_load_from_file(settings, config_file, G_KEY_FILE_NONE, NULL);
-	current_settings.cache = utils_get_setting_boolean(settings, "gFTP-main", "cache", FALSE);
-	current_settings.showhiddenfiles = utils_get_setting_boolean(settings, "gFTP-main", "show_hidden_files", FALSE);
+	if (current_settings.cache == -1)
+		current_settings.cache = utils_get_setting_boolean(settings, "gFTP-main", "cache", FALSE);
+	if (current_settings.showhiddenfiles == -1)
+		current_settings.showhiddenfiles = utils_get_setting_boolean(settings, "gFTP-main", "show_hidden_files", FALSE);
 	current_settings.autonav = utils_get_setting_boolean(settings, "gFTP-main", "auto_nav", FALSE);
 	current_settings.autoreload = utils_get_setting_boolean(settings, "gFTP-main", "auto_reload", TRUE);
 	if (current_settings.current_proxy == -1)
@@ -3015,7 +3030,15 @@ static void on_configure_response(GtkDialog *dialog, gint response, gpointer use
 	if (response == GTK_RESPONSE_OK || response == GTK_RESPONSE_APPLY) {
 		current_settings.autonav = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.autonav));
 		current_settings.autoreload = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.autoreload));
-		
+		current_settings.cache = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.cache));
+		current_settings.showhiddenfiles = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.showhiddenfiles));
+		g_signal_handler_block(popup.cdl, popup.cdl_handler_id);
+		gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(popup.cdl), current_settings.cache);
+		g_signal_handler_unblock(popup.cdl, popup.cdl_handler_id);
+		g_signal_handler_block(popup.shf, popup.shf_handler_id);
+		gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(popup.shf), current_settings.showhiddenfiles);
+		g_signal_handler_unblock(popup.shf, popup.shf_handler_id);
+
 		save_settings();
 		save_profiles(1);
 	}
@@ -3265,9 +3288,9 @@ void plugin_init(GeanyData *data)
 	gtk_frame_set_shadow_type(GTK_FRAME(frame1), GTK_SHADOW_IN);
 	gtk_frame_set_shadow_type(GTK_FRAME(frame2), GTK_SHADOW_IN);
 	gtk_paned_pack1(GTK_PANED(vpaned), frame1, TRUE, FALSE);
-	gtk_widget_set_size_request(frame1, -1, 150);
+	gtk_widget_set_size_request(frame1, -1, 100);
 	gtk_paned_pack2(GTK_PANED(vpaned), frame2, FALSE, FALSE);
-	gtk_widget_set_size_request(frame2, -1, 150);
+	gtk_widget_set_size_request(frame2, -1, 100);
 	
 	widget = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(widget),	GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
@@ -3283,6 +3306,8 @@ void plugin_init(GeanyData *data)
 	
 	gtk_box_pack_start(GTK_BOX(box), vpaned, TRUE, TRUE, 0);
 	
+	current_settings.cache = -1;
+	current_settings.showhiddenfiles = -1;
 	current_settings.current_proxy = -1;
 	load_settings(2);
 	
@@ -3487,7 +3512,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_widget_show_all(hbox);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), table, hbox);
 	
-	table = gtk_table_new(5, 5, FALSE);
+	table = gtk_table_new(7, 5, FALSE);
 	
 	store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 	gtk_list_store_append(store, &iter);
@@ -3561,6 +3586,18 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), current_settings.autoreload);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	pref.autoreload = widget;
+	
+	widget = gtk_check_button_new_with_label("Cache directory listings");
+	gtk_widget_set_tooltip_text(widget, "Browse faster if the directory listings are read from a local cached file.");
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), current_settings.cache);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 5, 6, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	pref.cache = widget;
+	
+	widget = gtk_check_button_new_with_label("Show hidden files");
+	gtk_widget_set_tooltip_text(widget, "Check this to display files whose name begins with a dot.");
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), current_settings.showhiddenfiles);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 6, 7, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	pref.showhiddenfiles = widget;
 	
 	load_settings(1);
 	

@@ -107,10 +107,19 @@ static struct
 	
 	GtkWidget *autonav;
 	GtkWidget *autoreload;
-	
+	GtkWidget *cache;
 	GtkWidget *showhiddenfiles;
+	
 	GtkWidget *notebook;
 } pref;
+
+static struct
+{
+	GtkWidget *shf;
+	gulong shf_handler_id;
+	GtkWidget *cdl;
+	gulong cdl_handler_id;
+} popup;
 
 static struct
 {
@@ -120,8 +129,8 @@ static struct
 
 static struct 
 {
-	gboolean cache;
-	gboolean showhiddenfiles;
+	gint cache;
+	gint showhiddenfiles;
 	gint current_proxy;
 	gchar **proxy_profiles;
 	gboolean autonav;
@@ -157,6 +166,7 @@ static void *disconnect(gpointer p);
 static void *to_get_dir_listing(gpointer p);
 static void load_profiles(gint type);
 static void load_settings(gint type);
+static void load_proxy_profiles();
 static gchar *load_profile_property(gint index, gchar *field);
 static void on_edit_profiles_changed(void);
 static void on_edit_proxy_profiles_changed(void);
