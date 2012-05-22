@@ -155,7 +155,7 @@ static int ftp_log(CURL *handle, curl_infotype type, gchar *data, size_t size, v
 		case CURLINFO_SSL_DATA_IN:
 			break;
 	}
-	if (g_regex_match_simple("^Connected\\sto\\s(.+?)\\s\\((.+?)\\)", firstline, G_REGEX_CASELESS, 0)) {
+	if (current_settings.enable_hosts && g_regex_match_simple("^Connected\\sto\\s(.+?)\\s\\((.+?)\\)", firstline, G_REGEX_CASELESS, 0)) {
 		GRegex *regex;
 		GMatchInfo *match_info;
 		regex = g_regex_new("^Connected\\sto\\s(.+?)\\s\\((.+?)\\)", G_REGEX_CASELESS, 0, NULL);
@@ -200,13 +200,15 @@ static int ftp_log(CURL *handle, curl_infotype type, gchar *data, size_t size, v
 
 static gchar *find_host (gchar *src)
 {
-	gchar** hostsparts;
-	gint i;
-	for (i = 0; i < g_strv_length(all_hosts); i++) {
-		hostsparts = g_strsplit(all_hosts[i], " ", 0);
-		if (g_strcmp0(hostsparts[0], src)==0)
-			src = g_strdup(hostsparts[1]);
-		g_strfreev(hostsparts);
+	if (current_settings.enable_hosts) {
+		gchar** hostsparts;
+		gint i;
+		for (i = 0; i < g_strv_length(all_hosts); i++) {
+			hostsparts = g_strsplit(all_hosts[i], " ", 0);
+			if (g_strcmp0(hostsparts[0], src)==0)
+				src = g_strdup(hostsparts[1]);
+			g_strfreev(hostsparts);
+		}
 	}
 	return src;
 }
@@ -263,8 +265,8 @@ static int add_item(gpointer data, gboolean is_dir)
 	gchar **parts=g_regex_split_simple("\n", data, 0, 0);
 	gboolean valid = gtk_tree_store_iter_is_valid(file_store, &parent);
 	if (strcmp(parts[0],".")==0||strcmp(parts[0],"..")==0) return 1;
-	if (!current_settings.showhiddenfiles && IS_CURRENT_PROFILE_SFTP && g_str_has_prefix(parts[0], ".")) 
-		return 1; // some SFTP server always shows the hidden files.
+	if (!current_settings.showhiddenfiles && g_str_has_prefix(parts[0], ".")) 
+		return 1; // some SFTP/FTP server always shows the hidden files.
 	GtkTreeIter iter;
 	gtk_tree_store_append(file_store, &iter, valid?&parent:NULL);
 	if (is_dir) {
@@ -1880,6 +1882,8 @@ static void save_settings()
 	g_key_file_set_boolean(config, "gFTP-main", "show_hidden_files", current_settings.showhiddenfiles);
 	g_key_file_set_boolean(config, "gFTP-main", "auto_nav", current_settings.autonav);
 	g_key_file_set_boolean(config, "gFTP-main", "auto_reload", current_settings.autoreload);
+	g_key_file_set_boolean(config, "gFTP-main", "enable_hosts", current_settings.enable_hosts);
+	g_key_file_set_boolean(config, "gFTP-main", "confirm_delete", current_settings.confirm_delete);
 	g_key_file_set_integer(config, "gFTP-main", "proxy", current_settings.current_proxy);
 	
 	if (G_IS_OBJECT(pref.proxy_combo)) {
@@ -1981,6 +1985,8 @@ static void load_settings(gint type)
 		current_settings.showhiddenfiles = utils_get_setting_boolean(settings, "gFTP-main", "show_hidden_files", FALSE);
 	current_settings.autonav = utils_get_setting_boolean(settings, "gFTP-main", "auto_nav", FALSE);
 	current_settings.autoreload = utils_get_setting_boolean(settings, "gFTP-main", "auto_reload", TRUE);
+	current_settings.enable_hosts = utils_get_setting_boolean(settings, "gFTP-main", "enable_hosts", TRUE);
+	current_settings.confirm_delete = utils_get_setting_boolean(settings, "gFTP-main", "confirm_delete", TRUE);
 	if (current_settings.current_proxy == -1)
 		current_settings.current_proxy = utils_get_setting_integer(settings, "gFTP-main", "proxy", 0);
 	current_settings.proxy_profiles = g_key_file_get_keys(settings, "gFTP-proxy", NULL, NULL);
@@ -2250,11 +2256,13 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 						if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
 							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
 							if (dirname) {
-								if (IS_CURRENT_PROFILE_SFTP)
-									add_pending_item(3, name, g_strdup_printf("rmdir \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname)));
-								else
-									add_pending_item(3, name, g_strdup_printf("RMD %s", dirname));
-								if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+								if (!current_settings.confirm_delete || dialogs_show_question("Are you sure you want to delete /%s%s ?", name, dirname)) {
+									if (IS_CURRENT_PROFILE_SFTP)
+										add_pending_item(3, name, g_strdup_printf("rmdir \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname)));
+									else
+										add_pending_item(3, name, g_strdup_printf("RMD %s", dirname));
+									if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+								}
 								g_free(dirname);
 							}
 						}
@@ -2270,9 +2278,9 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				if (g_strcmp0(name, ".")==0) name = "";
 				gchar *filename = NULL;
 				if (type==1)
-					filename = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), "Please input folder name:\n(recursively create missing folders,\neg. new/multi/level/folder)", "New Folder");
+					filename = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Location: /%s\nPlease input folder name:\n(recursively create missing folders,\neg. new/multi/level/folder)", name), "New Folder");
 				if (type==3)
-					filename = dialogs_show_input("Create Blank File", GTK_WINDOW(geany->main_widgets->window), "Please input file name:\n(recursively create missing folders,\neg. multi/level/folder.htm)", "New File");
+					filename = dialogs_show_input("Create Blank File", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Location: /%s\nPlease input file name:\n(recursively create missing folders,\neg. multi/level/folder.htm)", name), "New File");
 				gchar *filepath;
 				if (filename && g_utf8_strlen(filename, -1)>0) {
 					if (type==1) // to create folder, add a '/' suffix
@@ -2310,11 +2318,13 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 						if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
 							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
 							if (dirname) {
-								if (IS_CURRENT_PROFILE_SFTP)
-									add_pending_item(3, name, g_strdup_printf("rm \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname)));
-								else
-									add_pending_item(3, name, g_strdup_printf("DELE %s", dirname));
-								if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+								if (!current_settings.confirm_delete || dialogs_show_question("Are you sure you want to delete /%s%s ?", name, dirname)) {
+									if (IS_CURRENT_PROFILE_SFTP)
+										add_pending_item(3, name, g_strdup_printf("rm \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname)));
+									else
+										add_pending_item(3, name, g_strdup_printf("DELE %s", dirname));
+									if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+								}
 								g_free(dirname);
 							}
 						}
@@ -3061,6 +3071,8 @@ static void on_configure_response(GtkDialog *dialog, gint response, gpointer use
 		g_signal_handler_block(popup.shf, popup.shf_handler_id);
 		gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(popup.shf), current_settings.showhiddenfiles);
 		g_signal_handler_unblock(popup.shf, popup.shf_handler_id);
+		current_settings.enable_hosts = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.enable_hosts));
+		current_settings.confirm_delete = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.confirm_delete));
 
 		save_settings();
 		save_profiles(1);
@@ -3535,7 +3547,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_widget_show_all(hbox);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), table, hbox);
 	
-	table = gtk_table_new(7, 5, FALSE);
+	table = gtk_table_new(9, 5, FALSE);
 	
 	store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 	gtk_list_store_append(store, &iter);
@@ -3621,6 +3633,18 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), current_settings.showhiddenfiles);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 6, 7, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	pref.showhiddenfiles = widget;
+	
+	widget = gtk_check_button_new_with_label("Save host's IP address and connect via IP address later");
+	gtk_widget_set_tooltip_text(widget, "This may save you time as it only resolves the host for the first time.");
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), current_settings.enable_hosts);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 7, 8, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	pref.enable_hosts = widget;
+	
+	widget = gtk_check_button_new_with_label("Ask before deleting files and/or folders");
+	gtk_widget_set_tooltip_text(widget, "File deletion cannot be undone. Check this if you haven't backed up your data.");
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), current_settings.confirm_delete);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 8, 9, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	pref.confirm_delete = widget;
 	
 	load_settings(1);
 	

@@ -109,6 +109,8 @@ static struct
 	GtkWidget *autoreload;
 	GtkWidget *cache;
 	GtkWidget *showhiddenfiles;
+	GtkWidget *enable_hosts;
+	GtkWidget *confirm_delete;
 	
 	GtkWidget *notebook;
 } pref;
@@ -135,6 +137,8 @@ static struct
 	gchar **proxy_profiles;
 	gboolean autonav;
 	gboolean autoreload;
+	gboolean enable_hosts;
+	gboolean confirm_delete;
 } current_settings;
 
 static struct 
