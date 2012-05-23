@@ -3,6 +3,7 @@
 
 enum
 {
+	KB_FOCUS_FILE_VIEW,
 	KB_CREATE_BLANK_FILE,
 	KB_COUNT
 };

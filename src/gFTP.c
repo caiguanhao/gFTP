@@ -1479,6 +1479,7 @@ static void to_connect(GtkMenuItem *menuitem, int p)
 	FILEVIEW_COLUMN_INFO, current_profile.url, 
 	-1);
 	gtk_tree_view_set_cursor(GTK_TREE_VIEW(file_view), gtk_tree_model_get_path(GTK_TREE_MODEL(file_store), &iter), NULL, FALSE);
+	gtk_widget_grab_focus(file_view);
 	
 	curl = curl_easy_init();
 	
@@ -1503,11 +1504,14 @@ static GtkWidget *create_popup_menu(void)
 	GtkWidget *item, *menu;
 	
 	menu = gtk_menu_new();
+	GtkAccelGroup *ag;
+	ag = gtk_accel_group_new();
 	
 	item = gtk_image_menu_item_new_from_stock(GTK_STOCK_OPEN, NULL);
 	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "_Open (Download/Edit)");
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_open_clicked), NULL);
+	gtk_widget_add_accelerator(item, "activate", ag, 0xff0d, 0, GTK_ACCEL_VISIBLE);
 	
 	item = gtk_menu_item_new_with_mnemonic("_View on the Web");
 	gtk_container_add(GTK_CONTAINER(menu), item);
@@ -1519,6 +1523,7 @@ static GtkWidget *create_popup_menu(void)
 	item = gtk_menu_item_new_with_mnemonic("_Refresh");
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)88);
+	gtk_widget_add_accelerator(item, "activate", ag, 0xff0d, 0, GTK_ACCEL_VISIBLE);
 	
 	item = gtk_separator_menu_item_new();
 	gtk_container_add(GTK_CONTAINER(menu), item);
@@ -1532,6 +1537,7 @@ static GtkWidget *create_popup_menu(void)
 	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "Delete _Empty Folder");
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)2);
+	gtk_widget_add_accelerator(item, "activate", ag, 0xffff, 0, GTK_ACCEL_VISIBLE);
 	
 	item = gtk_separator_menu_item_new();
 	gtk_container_add(GTK_CONTAINER(menu), item);
@@ -1553,6 +1559,7 @@ static GtkWidget *create_popup_menu(void)
 	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "_Delete File");
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)4);
+	gtk_widget_add_accelerator(item, "activate", ag, 0xffff, 0, GTK_ACCEL_VISIBLE);
 	
 	item = gtk_separator_menu_item_new();
 	gtk_container_add(GTK_CONTAINER(menu), item);
@@ -2213,6 +2220,25 @@ static gchar *quote_add_slash(gchar *src)
 	return src;
 }
 
+static void right_click_menu_position_func (GtkMenu *menu, gint *x, gint *y, gboolean *push_in, gpointer data) {
+	GdkWindow *gdk_window;
+	gdk_window = gtk_widget_get_window(file_view);
+	gdk_window_get_origin(gdk_window, x, y);
+	GtkAllocation allocation;
+	GtkTreeSelection *treesel;
+	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
+	GList *list;
+	GdkRectangle rect;
+	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
+	list = gtk_tree_selection_get_selected_rows(treesel, &model);
+	gtk_tree_view_get_cell_area(GTK_TREE_VIEW(file_view), list->data, NULL, &rect);
+	gtk_widget_get_allocation(file_view, &allocation);
+	if (rect.y<=allocation.height-rect.height) {
+		*x += rect.x + allocation.width/2;
+		*y += rect.y + rect.height/2;
+	}
+}
+
 static gboolean on_abort_check_aborted(gpointer user_data)
 {
 	if (gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pending_store), NULL)==0) {
@@ -2544,6 +2570,47 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
 	}
 	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
 	g_list_free(list);
+	return FALSE;
+}
+
+static gboolean on_key_release(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
+{
+	switch (event->keyval) {
+		case 0xff0d:
+		case 0xff8d:
+			on_open_clicked(NULL, NULL);
+			break;
+		case 0xff53: // arrow right
+		case 0xff51: // arrow left
+			{
+				GtkTreeSelection *treesel;
+				GtkTreeModel *model = GTK_TREE_MODEL(file_store);
+				GList *list;
+				treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
+				list = gtk_tree_selection_get_selected_rows(treesel, &model);
+				if (is_single_selection(treesel)) {
+					if (event->keyval == 0xff53) {
+						gtk_tree_view_expand_row(GTK_TREE_VIEW(file_view), list->data, TRUE);
+					} else if (event->keyval == 0xff51) {
+						gtk_tree_view_collapse_row(GTK_TREE_VIEW(file_view), list->data);
+					}
+				}
+				g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
+				g_list_free(list);
+			}
+			break;
+		case 0xffff: // delete
+			on_menu_item_clicked(NULL, (gpointer)2);
+			on_menu_item_clicked(NULL, (gpointer)4);
+			break;
+		case 0xff67: // menu key
+			{
+				static GtkWidget *popup_menu = NULL;
+				if (popup_menu==NULL) popup_menu = create_popup_menu();
+				gtk_menu_popup(GTK_MENU(popup_menu), NULL, NULL, (GtkMenuPositionFunc)right_click_menu_position_func, NULL, 0, GDK_CURRENT_TIME);
+			}
+			break;
+	}
 	return FALSE;
 }
 
@@ -3228,6 +3295,7 @@ static void prepare_file_view()
 	gtk_tree_view_set_tooltip_column(GTK_TREE_VIEW(file_view), FILEVIEW_COLUMN_INFO);
 	
 	g_signal_connect(file_view, "button-press-event", G_CALLBACK(on_button_press), NULL);
+	g_signal_connect(file_view, "key-release-event", G_CALLBACK(on_key_release), NULL);
 	
 	const GtkTargetEntry drag_dest_types[] = {
 		{ "STRING",			0, 0 },
@@ -3354,6 +3422,9 @@ static void kb_activate(guint key_id)
 	gtk_notebook_set_current_page(GTK_NOTEBOOK(geany->main_widgets->sidebar_notebook), page_number);
 	switch (key_id)
 	{
+		case KB_FOCUS_FILE_VIEW:
+			gtk_widget_grab_focus(file_view);
+			break;
 		case KB_CREATE_BLANK_FILE:
 			on_menu_item_clicked(NULL, (gpointer)3);
 			break;
@@ -3419,6 +3490,7 @@ void plugin_init(GeanyData *data)
 	page_number = gtk_notebook_append_page(GTK_NOTEBOOK(geany->main_widgets->sidebar_notebook), box, gtk_label_new("FTP"));
 	gdk_threads_leave();
 	
+	keybindings_set_item(plugin_key_group, KB_FOCUS_FILE_VIEW, kb_activate, 0x041, GDK_SHIFT_MASK | GDK_CONTROL_MASK, "focus_file_view", "Focus File View", NULL);
 	keybindings_set_item(plugin_key_group, KB_CREATE_BLANK_FILE, kb_activate, 0x04e, GDK_SHIFT_MASK | GDK_CONTROL_MASK, "create_blank_file", "Create Blank File", NULL);
 	
 	plugin_signal_connect(geany_plugin, NULL, "document-save", TRUE, G_CALLBACK(on_document_save), NULL);
