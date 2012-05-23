@@ -30,6 +30,7 @@ static gboolean to_abort = FALSE;
 static gboolean adding = FALSE;
 static gint page_number = 0, config_page_number = 0;
 static gint last_file_view_y = 0;
+static GtkTreePath *drag_begin_selected;
 static GMutex *mutex;
 
 #ifndef BASE64ENCODE_TIMES
@@ -143,6 +144,7 @@ static struct
 
 static struct 
 {
+	gchar *working_directory;
 	gchar *url;
 	gint index;
 	gchar *name;

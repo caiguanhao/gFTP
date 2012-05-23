@@ -1144,7 +1144,7 @@ static void *get_dir_listing(gpointer p)
 			curl_easy_perform(curl);
 		}
 	}
-	
+	curl_easy_getinfo(curl, CURLINFO_FTP_ENTRY_PATH, &current_profile.working_directory);
 	if (!to_abort) {
 		if (curl && download_listing) {
 			if (current_settings.cache) {
@@ -1444,6 +1444,7 @@ static void to_use_proxy(GtkMenuItem *menuitem, int p)
 static void to_connect(GtkMenuItem *menuitem, int p)
 {
 	to_abort = FALSE;
+	current_profile.working_directory = "";
 	current_profile.cert = "";
 	current_profile.index = p;
 	load_profiles(2);
@@ -2185,7 +2186,7 @@ static gchar *return_web_url(gchar *name, gboolean is_dir)
 	
 	if (g_utf8_strlen(url, -1)==0)
 		url = g_strdup(current_profile.url);
-	else if (!g_regex_match_simple("^https?://", url, G_REGEX_CASELESS, 0)) 
+	else if (!g_regex_match_simple("^(https|http|file)://", url, G_REGEX_CASELESS, 0)) 
 		url = g_strconcat("http://", url, NULL);
 	
 	if (!g_str_has_suffix(url, "/")) 
@@ -3082,12 +3083,8 @@ static void on_configure_response(GtkDialog *dialog, gint response, gpointer use
 static void on_window_drag_data_received(GtkWidget *widget, GdkDragContext *drag_context, gint x, gint y, GtkSelectionData *data, guint target_type, guint event_time, gpointer user_data)
 {
 	gboolean success = FALSE;
-
+	
 	if (curl && data->length > 0 && data->format == 8) {
-		gchar *filenames = g_strndup((gchar *) data->data, data->length);
-		gchar *filename;
-		filename = strtok(filenames, "\r\n");
-		
 		GtkTreePath *path;
 		GtkTreeIter iter;
 		gchar *name;
@@ -3105,15 +3102,22 @@ static void on_window_drag_data_received(GtkWidget *widget, GdkDragContext *drag
 		gchar *dst;
 		gchar *filepath;
 		redefine_parent_iter(name, FALSE);
-		while (filename!=NULL) {
-			filepath = g_filename_from_uri(filename, NULL, NULL);
-			dst = g_strconcat(name, g_path_get_basename(filepath), NULL);
-			add_pending_item(0, dst, filepath);
-			filename = strtok(NULL, "\r\n");
+		
+		gchar *filenames = g_strndup((gchar *) data->data, data->length);
+		gchar **filename;
+		int i;
+		filename = g_regex_split_simple("\r|\n", filenames, 0, 0);
+		
+		for (i=0; i<g_strv_length(filename); i++) {
+			if (g_utf8_strlen(filename[i], -1)>0) {
+				filepath = g_filename_from_uri(filename[i], NULL, NULL);
+				dst = g_strconcat(name, g_path_get_basename(filepath), NULL);
+				add_pending_item(0, dst, filepath);
+			}
 		}
 		if (current_settings.autoreload) add_pending_item(22, dst, NULL);
 		g_free(filenames);
-		g_free(filename);
+		g_strfreev(filename);
 		success = TRUE;
 	}
 	gtk_drag_finish(drag_context, success, FALSE, event_time);
@@ -3125,6 +3129,67 @@ static gboolean drag_motion (GtkWidget *widget, GdkDragContext *context, gint x,
 	gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(file_view), x, y, &path, NULL, NULL, NULL);
 	gtk_tree_view_set_cursor(GTK_TREE_VIEW(file_view), path, NULL, FALSE);
 	return TRUE;
+}
+
+static void drag_data_get (GtkWidget *widget, GdkDragContext *drag_context, GtkSelectionData *data, guint info, guint time, gpointer user_data)
+{
+	GtkTreeIter iter;
+	gchar *drag_begin_selected_path;
+	if (gtk_tree_model_get_iter(GTK_TREE_MODEL(file_store), &iter, drag_begin_selected)) {
+		gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &drag_begin_selected_path, -1);
+		gchar *uris[] = {g_uri_escape_string(return_web_url(drag_begin_selected_path, FALSE), "/:@&%=?.#", FALSE), NULL};
+		gtk_selection_data_set_uris(data, uris);
+	}
+}
+
+static void drag_begin (GtkWidget *widget, GdkDragContext *drag_context, gpointer user_data)
+{
+	GtkTreePath *path;
+	GtkTreeIter iter;
+	gchar *icon;
+	gtk_tree_view_get_cursor(GTK_TREE_VIEW(file_view), &path, NULL);
+	if (gtk_tree_model_get_iter(GTK_TREE_MODEL(file_store), &iter, path)) {
+		gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_ICON, &icon, -1);
+		if (!utils_str_equal(icon, GTK_STOCK_DIRECTORY)) {
+			drag_begin_selected = path;
+		}
+	}
+}
+
+static void drag_end (GtkWidget *widget, GdkDragContext *drag_context, gpointer user_data)
+{
+	GtkTreePath *path;
+	GtkTreeIter drag_begin_iter;
+	GtkTreeIter iter;
+	gchar *name;
+	gchar *icon;
+	gchar *drag_begin_selected_path;
+	gchar *new_file_path;
+	gtk_tree_view_get_cursor(GTK_TREE_VIEW(file_view), &path, NULL);
+	if (gtk_tree_model_get_iter(GTK_TREE_MODEL(file_store), &drag_begin_iter, drag_begin_selected)) {
+		gtk_tree_model_get(GTK_TREE_MODEL(file_store), &drag_begin_iter, FILEVIEW_COLUMN_DIR, &drag_begin_selected_path, -1);
+		if (gtk_tree_model_get_iter(GTK_TREE_MODEL(file_store), &iter, path)) {
+			gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &name, -1);
+			new_file_path = name;
+			if (!utils_str_equal(icon, GTK_STOCK_DIRECTORY)) {
+				new_file_path = g_path_get_dirname(name);
+			}
+			new_file_path = g_build_filename(new_file_path, g_path_get_basename(drag_begin_selected_path), NULL);
+			if (g_strcmp0(g_path_get_dirname(new_file_path), g_path_get_dirname(drag_begin_selected_path))!=0) {
+				gchar *wd;
+				wd = current_profile.working_directory;
+				if (!wd || g_utf8_strlen(wd, -1)==0) wd = "";
+				if (dialogs_show_question("Do you want to move\n%s/%s\nto\n%s/%s ?", wd, drag_begin_selected_path, wd, new_file_path)) {
+					gtk_tree_store_remove(file_store, &drag_begin_iter);
+					if (IS_CURRENT_PROFILE_SFTP)
+						add_pending_item(3, name, g_strdup_printf("rename \"%s/%s\" \"/%s/%s\"", quote_add_slash(wd), quote_add_slash(drag_begin_selected_path), quote_add_slash(wd), quote_add_slash(new_file_path)));
+					else
+						add_pending_item(3, name, g_strdup_printf("RNFR %s/%s\nRNTO %s/%s", wd, drag_begin_selected_path, wd, new_file_path));
+					if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+				}
+			}
+		}
+	}
 }
 
 static gboolean profiles_treeview_row_is_separator(GtkTreeModel *model, GtkTreeIter *iter, gpointer data)
@@ -3170,10 +3235,14 @@ static void prepare_file_view()
 		{ "text/plain",		0, 0 },
 		{ "text/uri-list",	0, 0 }
 	};
-	gtk_drag_dest_set(file_view, GTK_DEST_DEFAULT_ALL, drag_dest_types, G_N_ELEMENTS(drag_dest_types), GDK_ACTION_COPY);
+	gtk_drag_source_set(file_view, GDK_BUTTON1_MASK, drag_dest_types, G_N_ELEMENTS(drag_dest_types), GDK_ACTION_MOVE);
+	gtk_drag_dest_set(file_view, GTK_DEST_DEFAULT_ALL, drag_dest_types, G_N_ELEMENTS(drag_dest_types), GDK_ACTION_MOVE | GDK_ACTION_COPY);
 	
 	g_signal_connect(file_view, "drag-data-received", G_CALLBACK(on_window_drag_data_received), NULL);
 	g_signal_connect(file_view, "drag-motion", G_CALLBACK(drag_motion), NULL);
+	g_signal_connect(file_view, "drag-data-get", G_CALLBACK(drag_data_get), NULL);
+	g_signal_connect(file_view, "drag-begin", G_CALLBACK(drag_begin), NULL);
+	g_signal_connect(file_view, "drag-end", G_CALLBACK(drag_end), NULL);
 }
 
 static void prepare_pending_view()
@@ -3525,7 +3594,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 11, 12, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_entry_new();
-	gtk_widget_set_tooltip_text(widget, "Corresponding web host for your FTP account. (e.g. http://www.example.com/)");
+	gtk_widget_set_tooltip_text(widget, "Corresponding web host for your FTP account (e.g. http://www.example.com/). Use file:/// to view locally.");
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 4, 11, 12, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), dialog);
 	pref.webhost = widget;
