@@ -38,19 +38,6 @@ static GMutex *mutex;
 #define BASE64ENCODE_TIMES 8
 #endif
 
-struct string
-{
-	char *ptr;
-	int len;
-};
-
-struct transfer
-{
-	char *from;
-	char *to;
-	gboolean cache_enabled;
-};
-
 struct rate
 {
 	double prev_s;
@@ -170,7 +157,7 @@ static void save_hosts();
 static void execute();
 static void execute_end(gint type);
 static void *disconnect(gpointer p);
-static void *to_get_dir_listing(gpointer p);
+static void *to_get_dir_listing(GList *p);
 static void load_profiles(gint type);
 static void load_settings(gint type);
 static void load_proxy_profiles();
@@ -185,7 +172,7 @@ static void on_retry_use_anonymous_toggled(GtkToggleButton *togglebutton, gpoint
 static void on_retry_show_password_toggled(GtkToggleButton *togglebutton, gpointer user_data);
 static void on_retry_dialog_response(GtkDialog *dialog, gint response, gpointer user_data);
 static size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream);
-static size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str);
+static size_t write_function(void *ptr, size_t size, size_t nmemb, void *p);
 static gboolean focus_widget(gpointer p);
 static int to_auth_type(gchar *type);
 static int to_proxy_type(gchar *type);

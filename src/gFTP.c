@@ -183,13 +183,6 @@ static int ftp_log(CURL *handle, curl_infotype type, gchar *data, size_t size, v
 		if (g_regex_match_simple("failure.*establish", firstline, G_REGEX_CASELESS, 0))
 			dialogs_show_msgbox(GTK_MESSAGE_WARNING, "%s\n\nYou may:\n- Check the hostname or port number.", firstline);
 	}
-	if (gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
-		gint pulse;
-		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 3, &pulse, -1);
-		if (pulse>=0) {
-			gtk_list_store_set(pending_store, &current_pending, 3, pulse + 1, -1);
-		}
-	}
 	gdk_threads_leave();
 	if (g_regex_match_simple("^530|500\\sUSER", firstline, 0, 0)) {
 		curl_easy_reset(curl);
@@ -211,6 +204,18 @@ static gchar *find_host (gchar *src)
 		}
 	}
 	return src;
+}
+
+static gboolean current_pending_progress(guint interval, GSourceFunc function, gpointer data)
+{
+	if (gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
+		gint pulse;
+		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 3, &pulse, -1);
+		if (pulse>=0) {
+			gtk_list_store_set(pending_store, &current_pending, 3, pulse + 1, -1);
+		}
+	}
+	return TRUE;
 }
 
 static void add_pending_item(gint type, gchar *n1, gchar *n2)
@@ -275,14 +280,14 @@ static int add_item(gpointer data, gboolean is_dir)
 		if (g_regex_match(regex, parts[0], 0, NULL)) {
 			gchar **nameparts=g_regex_split(regex, parts[0], 0);
 			if (g_strcmp0(parts[1],g_strdup_printf("%ld",g_utf8_strlen(nameparts[1],-1)))==0) {
-				sprintf(parts[0], "%s", nameparts[0]);
-				sprintf(parts[1], "link");
+				parts[0] = g_strdup_printf("%s", nameparts[0]);
+				parts[1] = g_strdup_printf("link");
 			}
 			g_strfreev(nameparts);
 		}
 		g_regex_unref(regex);
-		if (strcmp(parts[1],"0")==0) {
-			sprintf(parts[1], "%s", "");
+		if (g_strcmp0(parts[1],"0")==0) {
+			parts[1] = g_strdup("");
 		}
 	}
 	gchar *parent_dir, *filename;
@@ -394,8 +399,8 @@ static int to_list(const gchar *listdata, gchar *lsf)
 {
 	if (to_abort) return 2;
 	if (g_utf8_strlen(listdata, -1)==0) return 2;
-	GList *filelist;
-	GList *dirlist;
+	GList *filelist = NULL;
+	GList *dirlist = NULL;
 	gchar *odata;
 	gtk_tree_model_get(GTK_TREE_MODEL(file_store), &parent, FILEVIEW_COLUMN_DIR, &odata, -1);
 	if (g_utf8_strlen(lsf, -1)>0 && g_strcmp0(lsf, "./")!=0 && g_strcmp0(lsf, odata)!=0) return 2;
@@ -485,14 +490,11 @@ static void open_external(const gchar *dir)
 	g_free(cmd);
 }
 
-static size_t write_function(void *ptr, size_t size, size_t nmemb, struct string *str)
+static size_t write_function(void *ptr, size_t size, size_t nmemb, void *p)
 {
-	int new_len = str->len + size * nmemb;
-	str->ptr = realloc(str->ptr, new_len + 1);
-	memcpy(str->ptr + str->len, ptr, size * nmemb);
-	str->ptr[new_len] = '\0';
-	str->len = new_len;
-	return size*nmemb;
+	GString *str = (GString *)p;
+	g_string_append_len(str, ptr, size * nmemb);
+	return size * nmemb;
 }
 
 static size_t write_data (void *ptr, size_t size, size_t nmemb, FILE *stream)
@@ -892,6 +894,8 @@ static int auth_config()
 						if (g_regex_match_simple("-----BEGIN\\sCERTIFICATE-----(.+?)-----END\\sCERTIFICATE-----\n", result, G_REGEX_MULTILINE | G_REGEX_DOTALL, 0)) {
 							ret = show_certificates(result);
 							if (ret==0) log_new_str(COLOR_BLUE, "Certificate verified by user.");
+						} else {
+							log_new_str(COLOR_RED, "Unable to get certificates from the server. Please check profile settings.");
 						}
 						gdk_threads_leave();
 						if (ret!=0) return 1;
@@ -928,17 +932,17 @@ static int auth_config()
 
 static void *download_file(gpointer p)
 {
-	struct transfer *dl = (struct transfer *)p;
+	GList *dl = (GList *)p;
 	struct rate dlspeed;
 	dlspeed.prev_s = 0.0;
 	g_get_current_time(&dlspeed.prev_t);
-	gchar *dlto = g_strdup(dl->to);
-	gchar *dlfrom = g_strdup(dl->from);
+	GString *dlfrom = g_string_new((gchar *)g_list_nth_data(dl, 0));
+	GString *dlto = g_string_new((gchar *)g_list_nth_data(dl, 1));
 	if (curl) {
 		FILE *fp;
-		fp=fopen(dlto,"wb");
-		dlfrom = g_strconcat(current_profile.url, dlfrom, NULL);
-		curl_easy_setopt(curl, CURLOPT_URL, find_host(dlfrom));
+		fp=fopen(dlto->str,"wb");
+		g_string_prepend(dlfrom, current_profile.url);
+		curl_easy_setopt(curl, CURLOPT_URL, find_host(dlfrom->str));
 		proxy_config();
 		auth_config();
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
@@ -960,15 +964,13 @@ static void *download_file(gpointer p)
 		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Total download time: %0.3f s.", val));
 		curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD, &val);
 		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Average download speed: %s/s.", g_format_size_for_display(val)));
-		if (!to_abort && dlto)
-			if (!document_open_file(dlto, FALSE, NULL, NULL))
+		if (!to_abort && dlto->str)
+			if (!document_open_file(dlto->str, FALSE, NULL, NULL))
 				if (dialogs_show_question("Could not open the file in Geany. View it in file browser?"))
-					open_external(g_path_get_dirname(dlto));
+					open_external(g_path_get_dirname(dlto->str));
 	}
 	gtk_widget_hide(geany->main_widgets->progressbar);
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
-	g_free(dlto);
-	g_free(dlfrom);
 	execute_end(1);
 	gdk_threads_leave();
 	g_thread_exit(NULL);
@@ -977,19 +979,20 @@ static void *download_file(gpointer p)
 
 static void *upload_file(gpointer p)
 {
-	struct transfer *ul = (struct transfer *)p;
-	gchar *ulto = ul->to;
-	gchar *ulfrom = ul->from;
+	GList *ul = (GList *)p;
+	GString *ulfrom = g_string_new((gchar *)g_list_nth_data(ul, 0));
+	GString *ulto = g_string_new((gchar *)g_list_nth_data(ul, 1));
+	printf("%s", ulto->str);
 	struct uploadf file;
 	g_get_current_time(&file.prev_t);
 	if (curl) {
 		file.transfered=0;
-		if (!(file.fp=fopen(ulfrom,"rb"))) goto end;
+		if (!(file.fp=fopen(ulfrom->str,"rb"))) goto end;
 		fseek(file.fp, 0L, SEEK_END);
 		file.filesize = ftell(file.fp);
 		fseek(file.fp, 0L, SEEK_SET);
-		ulto = g_strconcat(current_profile.url, ulto, NULL);
-		curl_easy_setopt(curl, CURLOPT_URL, find_host(ulto));
+		g_string_prepend(ulto, current_profile.url);
+		curl_easy_setopt(curl, CURLOPT_URL, find_host(ulto->str));
 		proxy_config();
 		auth_config();
 		curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
@@ -1056,28 +1059,28 @@ static void *create_file(gpointer p)
 static void *get_dir_listing(gpointer p)
 {
 	g_mutex_lock(mutex);
-	struct transfer *ls = (struct transfer *)p;
-	gchar *lsfrom = ls->from;
-	gchar *lsto = ls->to;
+	GList *ls = (GList *)p;
+	GString *lsfrom = g_string_new((gchar *)g_list_nth_data(ls, 0));
+	GString *lsto = g_string_new((gchar *)g_list_nth_data(ls, 1));
+	GString *url = g_string_new((gchar *)g_list_nth_data(ls, 2));
 	gboolean cache_enabled = FALSE;
 	gboolean auto_scroll = FALSE;
 	gboolean download_listing = TRUE;
-	if (ls->cache_enabled==TRUE) cache_enabled = TRUE;
-	if (g_strcmp0(lsto, "")!=0) {
-		if (!redefine_parent_iter(lsto, TRUE))
+	if ((gint)g_list_nth_data(ls, 3)==1) cache_enabled = TRUE;
+	if (g_strcmp0(lsto->str, "")!=0) {
+		if (!redefine_parent_iter(lsto->str, TRUE)) {
 			goto end;
-		else
+		} else
 			auto_scroll = TRUE;
 	}
-	const gchar *url = g_strconcat(current_profile.url, lsfrom, NULL);
-	struct string str;
-	str.len = 0;
-	str.ptr = malloc(1);
-	str.ptr[0] = '\0';
+	GString *str;
+	str = g_string_new("");
 	GKeyFile *cachekeyfile = g_key_file_new();
 	gint unixtime = (gint)time(NULL);
-	gchar *listing;
+	GString *listing;
+	listing = g_string_new("");
 	gchar *ofilename = g_strconcat(current_profile.login, "@", current_profile.host, NULL);
+	CURLcode code;
 	if (curl) {
 		if (current_settings.cache) {
 			cache_file = g_build_filename(g_get_user_cache_dir(), "geany", "gFTP", NULL);
@@ -1088,19 +1091,19 @@ static void *get_dir_listing(gpointer p)
 				g_key_file_load_from_file(cachekeyfile, cache_file, G_KEY_FILE_NONE, NULL);
 				if (cache_enabled) {
 					gint ctime;
-					ctime = utils_get_setting_integer(cachekeyfile, lsfrom, "_____time", 0);
+					ctime = utils_get_setting_integer(cachekeyfile, lsfrom->str, "_____time", 0);
 					if (unixtime-ctime > 7*24*60*60) {
 						download_listing = TRUE;
 					} else {
-						gchar *content = utils_get_setting_string(cachekeyfile, lsfrom, "__rawdata", "");
-						gchar *_checksum = utils_get_setting_string(cachekeyfile, lsfrom, "_checksum", "");
+						gchar *content = utils_get_setting_string(cachekeyfile, lsfrom->str, "__rawdata", "");
+						gchar *_checksum = utils_get_setting_string(cachekeyfile, lsfrom->str, "_checksum", "");
 						gsize len;
 						content = (gchar *)g_base64_decode(content, &len);
-						gchar *all = g_strdup_printf("%s\n%s\n%d", lsfrom, content, ctime);
+						gchar *all = g_strdup_printf("%s\n%s\n%d", lsfrom->str, content, ctime);
 						gchar *checksum = g_compute_checksum_for_string(G_CHECKSUM_MD5, all, g_utf8_strlen(all, -1));
 						if (g_strcmp0(checksum, _checksum)==0) {
 							download_listing = FALSE;
-							listing = g_strdup(content);
+							g_string_append(listing, content);
 							time_t ptime = (time_t)ctime;
 							log_new_str(COLOR_BLUE, g_strdup_printf("Reading directory listing cached on %s. [checksum=%s]", utils_get_date_time("%Y-%m-%d %H:%M:%S", &ptime), _checksum));
 						} else {
@@ -1118,7 +1121,7 @@ static void *get_dir_listing(gpointer p)
 		}
 		
 		if (download_listing) {
-			curl_easy_setopt(curl, CURLOPT_URL, find_host((gchar *)url));
+			curl_easy_setopt(curl, CURLOPT_URL, find_host(url->str));
 			proxy_config();
 			if (auth_config()!=0) {
 				gdk_threads_enter();
@@ -1127,7 +1130,7 @@ static void *get_dir_listing(gpointer p)
 				goto end;
 			}
 			curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_function);
-			curl_easy_setopt(curl, CURLOPT_WRITEDATA, &str);
+			curl_easy_setopt(curl, CURLOPT_WRITEDATA, str);
 			curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, normal_progress);
 			curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
 			curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
@@ -1141,7 +1144,12 @@ static void *get_dir_listing(gpointer p)
 				else
 					curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "LIST -a");
 			}
-			curl_easy_perform(curl);
+			code = curl_easy_perform(curl);
+			if (code!=0) {
+				gdk_threads_enter();
+				log_new_str(COLOR_RED, g_strdup_printf("ERROR %d: %s (%s)", code, curl_easy_strerror(code), url->str));
+				gdk_threads_leave();
+			}
 		}
 	}
 	curl_easy_getinfo(curl, CURLINFO_FTP_ENTRY_PATH, &current_profile.working_directory);
@@ -1149,12 +1157,12 @@ static void *get_dir_listing(gpointer p)
 		if (curl && download_listing) {
 			if (current_settings.cache) {
 				g_key_file_set_comment(cachekeyfile, NULL, NULL, ofilename, NULL);
-				gchar *encoded = g_base64_encode((guchar *)str.ptr, str.len);
-				gchar *all = g_strdup_printf("%s\n%s\n%d", lsfrom, str.ptr, unixtime);
+				gchar *encoded = g_base64_encode((guchar *)str->str, str->len);
+				gchar *all = g_strdup_printf("%s\n%s\n%d", lsfrom->str, str->str, unixtime);
 				gchar *checksum = g_compute_checksum_for_string(G_CHECKSUM_MD5, all, g_utf8_strlen(all, -1));
-				g_key_file_set_integer(cachekeyfile, lsfrom, "_____time", unixtime);
-				g_key_file_set_string(cachekeyfile, lsfrom, "_checksum", checksum);
-				g_key_file_set_string(cachekeyfile, lsfrom, "__rawdata", encoded);
+				g_key_file_set_integer(cachekeyfile, lsfrom->str, "_____time", unixtime);
+				g_key_file_set_string(cachekeyfile, lsfrom->str, "_checksum", checksum);
+				g_key_file_set_string(cachekeyfile, lsfrom->str, "__rawdata", encoded);
 				gchar *data = g_key_file_to_data(cachekeyfile, NULL, NULL);
 				utils_write_file(cache_file, data);
 				g_free(data);
@@ -1162,28 +1170,26 @@ static void *get_dir_listing(gpointer p)
 				g_free(checksum);
 				g_free(encoded);
 			}
-			listing = g_strdup(str.ptr);
+			g_string_assign(listing, str->str);
 		}
 		last_tree_view_pos(TRUE);
 		clear_children();
-		gchar *lsf;
 		int to_list_return;
-		lsf = g_strdup_printf("%s", lsfrom);
-		to_list_return = to_list(listing, lsf);
+		to_list_return = to_list(listing->str, lsfrom->str);
 		if (to_list_return==0) {
 			last_tree_view_pos(FALSE);
 			gdk_threads_enter();
 			gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(toolbar.connect), GTK_STOCK_DISCONNECT);
 			if (auto_scroll) fileview_scroll_to_iter(&parent);
 			gdk_threads_leave();
-		} else if (to_list_return==1 && g_utf8_strlen(listing, -1)>0) {
+		} else if (to_list_return==1 && listing->len>0) {
 			gdk_threads_enter();
 			gchar *tmp_lst_file;
 			tmp_lst_file = g_strconcat(tmp_dir, "/", current_profile.login, "@", current_profile.host, NULL);
 			g_mkdir_with_parents(tmp_lst_file, 0777);
-			tmp_lst_file = g_strconcat(tmp_lst_file, "/", g_compute_checksum_for_string(G_CHECKSUM_SHA1, listing, -1), NULL);
-			g_file_set_contents(tmp_lst_file, listing, -1, NULL);
-			if (g_regex_match_simple("<(.|\n)*?>", listing, 0, 0) && dialogs_show_question("It seems that it was an HTML document. Open it with default application?")) {
+			tmp_lst_file = g_strconcat(tmp_lst_file, "/", g_compute_checksum_for_string(G_CHECKSUM_SHA1, listing->str, -1), NULL);
+			g_file_set_contents(tmp_lst_file, listing->str, -1, NULL);
+			if (g_regex_match_simple("<(.|\n)*?>", listing->str, 0, 0) && dialogs_show_question("It seems that it was an HTML document. Open it with default application?")) {
 				GError* error = NULL;
 				gchar *argv[] = {"xdg-open", tmp_lst_file, NULL};
 				g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error);
@@ -1193,9 +1199,7 @@ static void *get_dir_listing(gpointer p)
 			g_free(tmp_lst_file);
 			gdk_threads_leave();
 		}
-		g_free(lsf);
 	}
-	free(str.ptr);
 	end:
 	gdk_threads_enter();
 	// don't g_free(listing) / g_free(ofilename) / g_key_file_free(cachekeyfile)
@@ -1282,27 +1286,27 @@ static gboolean on_retry_entry_keypress(GtkWidget *widget, GdkEventKey *event, g
 	return FALSE;
 }
 
-static void *to_download_file(gpointer p)
+static void *to_download_file(GList *p)
 {
 	curl_easy_reset(curl);
 	gtk_widget_show(geany->main_widgets->progressbar);
-	g_thread_create(&download_file, (gpointer)p, FALSE, NULL);
+	g_thread_create(&download_file, p, FALSE, NULL);
 	return NULL;
 }
 
-static void *to_upload_file(gpointer p)
+static void *to_upload_file(GList *p)
 {
 	curl_easy_reset(curl);
 	gtk_widget_show(geany->main_widgets->progressbar);
-	g_thread_create(&upload_file, (gpointer)p, FALSE, NULL);
+	g_thread_create(&upload_file, p, FALSE, NULL);
 	return NULL;
 }
 
-static void *to_get_dir_listing(gpointer p)
+static void *to_get_dir_listing(GList *p)
 {
 	curl_easy_reset(curl);
 	ui_progress_bar_start("Please wait...");
-	g_thread_create(&get_dir_listing, (gpointer)p, FALSE, NULL);
+	g_thread_create(&get_dir_listing, p, FALSE, NULL);
 	return NULL;
 }
 
@@ -1335,28 +1339,34 @@ static void execute()
 			4, &remote, 5, &local, 6, &type, -1);
 			switch (type) {
 				case 0: {
-					struct transfer ul;
-					ul.from = g_strdup(local);
-					ul.to = g_strdup(remote);
-					to_upload_file(&ul);
+					GList *ul = NULL;
+					ul = g_list_append(ul, local);
+					ul = g_list_append(ul, remote);
+					to_upload_file(ul);
 					break;
 				}
 				case 1: {
-					struct transfer dl;
-					dl.from = g_strdup(remote);
-					dl.to = g_strdup(local);
-					to_download_file(&dl);
+					GList *dl = NULL;
+					dl = g_list_append(dl, remote);
+					dl = g_list_append(dl, local);
+					to_download_file(dl);
 					break;
 				}
 				case 2:
 				case 22:
 				case 222:
 				case 2222: {
-					struct transfer ls;
-					ls.from = g_strconcat(g_path_get_dirname(remote), "/", NULL);
-					ls.to = g_strdup(local);
-					if (type==222 || type==2222) ls.cache_enabled = TRUE;
-					to_get_dir_listing(&ls);
+					gchar *dn = g_strdup_printf("%s/", g_path_get_dirname(remote));
+					if (g_strcmp0(dn, "./")==0)	dn = g_strdup("");
+					GList *ls = NULL;
+					ls = g_list_append(ls, g_strdup_printf("%s", dn));
+					ls = g_list_append(ls, local);
+					ls = g_list_append(ls, g_strdup_printf("%s%s", current_profile.url, dn));
+					if (type==222 || type==2222)
+						ls = g_list_append(ls, GINT_TO_POINTER(1));
+					else
+						ls = g_list_append(ls, GINT_TO_POINTER(0));
+					to_get_dir_listing(ls);
 					break;
 				}
 				case 3: {
@@ -1379,15 +1389,9 @@ static void execute()
 			gint i=0,y=0; //Used to stop an unknown error.
 			for(i=0; i<100000; i++){y+=1;}
 		}
-		g_free(remote);
-		g_free(local);
+		//g_free(remote);
+		//g_free(local);
 	}
-}
-
-static gboolean execute_wait(gpointer data)
-{
-	execute();
-	return FALSE;
 }
 
 static void execute_end(gint type)
@@ -1417,7 +1421,7 @@ static void execute_end(gint type)
 	running = FALSE;
 	gtk_widget_set_sensitive(toolbar.abort, FALSE);
 	if (!to_abort && gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pending_store), &current_pending)) {
-		g_timeout_add(200, (GSourceFunc)execute_wait, NULL);
+		execute();
 	}
 }
 
@@ -1624,24 +1628,26 @@ static gchar *decrypt(gchar *src)
 
 static gchar *encrypt(gchar *src)
 {
-	gchar *p1 = src;
-	gchar *p2 = NULL;
-	glong t, l1, l2;
-	for (t=0; t<BASE64ENCODE_TIMES; t++)
-	p1 = g_base64_encode((guchar *)p1, g_utf8_strlen(p1, -1));
-	l1 = g_utf8_strlen(p1, -1);
-	p2 = g_compute_checksum_for_string(G_CHECKSUM_SHA256, p1, g_utf8_strlen(p1, -1));
-	l2 = g_utf8_strlen(p2, -1);
-	src = "";
-	for (t=0; t<(l2>l1?l1:l2); t++)
-	src = g_strconcat(src, g_strndup(p1 + t, 1), g_strndup(p2 + t, 1), NULL);
-	if (l2>l1) {
-		src = g_strconcat(src, g_strndup(p2 + l1, l2), NULL);
-	} else {
-		src = g_strconcat(src, g_strndup(p1 + l2, l1), NULL);
+	if (g_utf8_strlen(src, -1)>0) {
+		gchar *p1 = src;
+		gchar *p2 = NULL;
+		glong t, l1, l2;
+		for (t=0; t<BASE64ENCODE_TIMES; t++)
+		p1 = g_base64_encode((guchar *)p1, g_utf8_strlen(p1, -1));
+		l1 = g_utf8_strlen(p1, -1);
+		p2 = g_compute_checksum_for_string(G_CHECKSUM_SHA256, p1, g_utf8_strlen(p1, -1));
+		l2 = g_utf8_strlen(p2, -1);
+		src = "";
+		for (t=0; t<(l2>l1?l1:l2); t++)
+		src = g_strconcat(src, g_strndup(p1 + t, 1), g_strndup(p2 + t, 1), NULL);
+		if (l2>l1) {
+			src = g_strconcat(src, g_strndup(p2 + l1, l2), NULL);
+		} else {
+			src = g_strconcat(src, g_strndup(p1 + l2, l1), NULL);
+		}
+		g_free(p1);
+		g_free(p2);
 	}
-	g_free(p1);
-	g_free(p2);
 	return src;
 }
 
@@ -1976,8 +1982,9 @@ static void load_proxy_profiles()
 		g_key_file_load_from_file(settings, config_file, G_KEY_FILE_NONE, NULL);
 		current_settings.proxy_profiles = g_key_file_get_keys(settings, "gFTP-proxy", NULL, NULL);
 		gint i;
-		for (i=0; i<g_strv_length(current_settings.proxy_profiles); i++) 
-			current_settings.proxy_profiles[i] = utils_get_setting_string(settings, "gFTP-proxy", current_settings.proxy_profiles[i], "");
+		if (current_settings.proxy_profiles) 
+			for (i=0; i<g_strv_length(current_settings.proxy_profiles); i++) 
+				current_settings.proxy_profiles[i] = utils_get_setting_string(settings, "gFTP-proxy", current_settings.proxy_profiles[i], "");
 		g_key_file_free(settings);
 	}
 }
@@ -2004,22 +2011,24 @@ static void load_settings(gint type)
 			gsize i;
 			gchar *name;
 			gchar **nameparts;
-			for (i=0; i<g_strv_length(current_settings.proxy_profiles); i++)  {
-				name = utils_get_setting_string(settings, "gFTP-proxy", current_settings.proxy_profiles[i], "");
-				if (g_utf8_strlen(name, -1)>0) {
-					nameparts = parse_proxy_string(name);
-					if (g_strv_length(nameparts)==4) {
-						gtk_list_store_append(GTK_LIST_STORE(pref.proxy_store), &iter);
-						gtk_list_store_set(GTK_LIST_STORE(pref.proxy_store), &iter, 
-						0, name, 
-						1, nameparts[1], 
-						2, nameparts[2], 
-						3, nameparts[3], 
-						-1);
+			if (current_settings.proxy_profiles) {
+				for (i=0; i<g_strv_length(current_settings.proxy_profiles); i++)  {
+					name = utils_get_setting_string(settings, "gFTP-proxy", current_settings.proxy_profiles[i], "");
+					if (g_utf8_strlen(name, -1)>0) {
+						nameparts = parse_proxy_string(name);
+						if (g_strv_length(nameparts)==4) {
+							gtk_list_store_append(GTK_LIST_STORE(pref.proxy_store), &iter);
+							gtk_list_store_set(GTK_LIST_STORE(pref.proxy_store), &iter, 
+							0, name, 
+							1, nameparts[1], 
+							2, nameparts[2], 
+							3, nameparts[3], 
+							-1);
+						}
+						g_strfreev(nameparts);
 					}
-					g_strfreev(nameparts);
+					g_free(name);
 				}
-				g_free(name);
 			}
 			break;
 		}
@@ -2101,12 +2110,12 @@ static void is_select_profiles_use_anonymous(GtkTreeIter *iter)
 
 static void check_delete_button_sensitive(GtkTreeIter *iter)
 {
-	gtk_widget_set_sensitive(pref.delete, !is_edit_profiles_selected_nth_item(iter, "0"));
+	gtk_widget_set_sensitive(pref.delete, iter?!is_edit_profiles_selected_nth_item(iter, "0"):FALSE);
 }
 
 static void check_delete_button_sensitive_proxy(GtkTreeIter *iter)
 {
-	gtk_widget_set_sensitive(pref.proxy_delete, !is_edit_profiles_selected_nth_item_proxy(iter, "0"));
+	gtk_widget_set_sensitive(pref.proxy_delete, iter?!is_edit_profiles_selected_nth_item_proxy(iter, "0"):FALSE);
 }
 
 static void check_private_key_browse_sensitive()
@@ -2239,6 +2248,23 @@ static void right_click_menu_position_func (GtkMenu *menu, gint *x, gint *y, gbo
 	}
 }
 
+static gboolean is_file_exists(GtkTreeIter iter, gboolean search_down_one_lvl, gchar *name)
+{
+	GtkTreeIter *a = gtk_tree_iter_copy(&iter);
+	GtkTreeIter b;
+	if (!search_down_one_lvl) gtk_tree_model_iter_parent(GTK_TREE_MODEL(file_store), a, &iter);
+	if (gtk_tree_model_iter_children(GTK_TREE_MODEL(file_store), &b, a)) {
+		gboolean valid = gtk_tree_store_iter_is_valid(file_store, &b);
+		gchar *fn;
+		while (valid) {
+			gtk_tree_model_get(GTK_TREE_MODEL(file_store), &b, FILEVIEW_COLUMN_NAME, &fn, -1);
+			if (fn && g_strcmp0(fn, name)==0) return TRUE;
+			valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(file_store), &b);
+		}
+	}
+	return FALSE;
+}
+
 static gboolean on_abort_check_aborted(gpointer user_data)
 {
 	if (gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pending_store), NULL)==0) {
@@ -2299,41 +2325,49 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 			case 1: // the same function to create folders and files.
 			case 3:
 				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+				gchar *defaultfn = "New File";
 				if (!is_folder_selected(list)) {
-					name = g_path_get_dirname(name);
+					defaultfn = g_strdup_printf("New %s", g_path_get_basename(name));
+					name = g_strdup_printf("%s/", g_path_get_dirname(name));
 				}
-				if (g_strcmp0(name, ".")==0) name = "";
+				if (g_strcmp0(name, "./")==0) name = "";
 				gchar *filename = NULL;
 				if (type==1)
-					filename = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Location: /%s\nPlease input folder name:\n(recursively create missing folders,\neg. new/multi/level/folder)", name), "New Folder");
+					filename = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Location: /%s\nPlease input folder name:\n- Recursively create missing folders, eg. new/multi/level/folder)", name), "New Folder");
 				if (type==3)
-					filename = dialogs_show_input("Create Blank File", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Location: /%s\nPlease input file name:\n(recursively create missing folders,\neg. multi/level/folder.htm)", name), "New File");
+					filename = dialogs_show_input("Create Blank File", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Location: /%s\nPlease input file name:\n- Recursively create missing folders, eg. multi/level/folder.htm)\n- Existing file will be cleared. Make sure you are creating a new file.", name), defaultfn);
 				gchar *filepath;
 				if (filename && g_utf8_strlen(filename, -1)>0) {
-					if (type==1) // to create folder, add a '/' suffix
-						filename = g_strconcat(filename, "/", NULL);
-					if (!IS_CURRENT_PROFILE_SFTP) { // in non-SFTP mode, curl only creates 1-lvl missing dir.
-						gchar **parts = g_strsplit(filename, "/", 0);
-						if (g_strv_length(parts)>2) {
-							gchar *ap = "";
-							gint i;
-							/* Don't put all MKD commands in one request:
-							 * e.g. add_pending_item(3, name, "MKD a\nMKD a/b\nMKD a/b/c")
-							 * as it would not continue if any parent folder (a. a/b) exists. */
-							for (i=0; i<g_strv_length(parts)-1; i++) {
-								if (g_utf8_strlen(parts[i], -1)>0) {
-									if (i>0) ap = g_strconcat(ap, "/", NULL);
-									ap = g_strconcat(ap, parts[i], NULL);
-									add_pending_item(3, name, g_strdup_printf("MKD %s", ap));
+					/* check file name in current level of file view
+					 * same file name will overwrite, same folder name won't change anything */
+					if (!is_file_exists(iter, is_folder_selected(list), filename) || type==1 || dialogs_show_question("'%s' already exists. Continue?\n- If the existing one is a file, it will be overwritten.\n- If the existing one is a folder, an error will be returned.", filename)) {
+						if (type==1) // to create folder, add a '/' suffix
+							filename = g_strconcat(filename, "/", NULL);
+						if (!IS_CURRENT_PROFILE_SFTP) { // in non-SFTP mode, curl only creates 1-lvl missing dir.
+							gchar **parts = g_strsplit(filename, "/", 0);
+							if (g_strv_length(parts)>2) {
+								gchar *ap = "";
+								gint i;
+								/* Don't put all MKD commands in one request:
+								 * e.g. add_pending_item(3, name, "MKD a\nMKD a/b\nMKD a/b/c")
+								 * as it would not continue if any parent folder (a. a/b) exists. */
+								for (i=0; i<g_strv_length(parts)-1; i++) {
+									if (g_utf8_strlen(parts[i], -1)>0) {
+										if (i>0) ap = g_strconcat(ap, "/", NULL);
+										ap = g_strconcat(ap, parts[i], NULL);
+										add_pending_item(3, name, g_strdup_printf("MKD %s", ap));
+									}
 								}
+							} else {
+								if (type==1) add_pending_item(3, name, g_strdup_printf("MKD %s", parts[0]));
 							}
+							g_strfreev(parts);
 						}
-						g_strfreev(parts);
+						filepath = g_strdup_printf("%s%s", name, filename);
+						add_pending_item(55, filepath, "");
+						if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+						g_free(filepath);
 					}
-					filepath = g_strdup_printf("%s%s", name, filename);
-					add_pending_item(55, filepath, "");
-					if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
-					g_free(filepath);
 					g_free(filename);
 				}
 				break;
@@ -2366,15 +2400,30 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 						gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
 						if (dirname) {
 							gchar *reto;
-							reto = dialogs_show_input("Rename To", GTK_WINDOW(geany->main_widgets->window), "Please input new folder name:", dirname);
+							gboolean exist;
+							again:
+							reto = dialogs_show_input("Rename To", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Please input new %s name:", is_folder_selected(list)?"folder":"file"), dirname);
 							if (reto && g_utf8_strlen(reto, -1)>0) {
 								if (g_strcmp0(reto, dirname)!=0) {
+									exist = is_file_exists(iter, FALSE, reto);
+									if (!exist) {
+										goto rename;
+									} else if (IS_CURRENT_PROFILE_SFTP) {
+										dialogs_show_msgbox(GTK_MESSAGE_WARNING, "It seems that '%s' already exists. Please choose another name.", reto);
+										goto again;
+									} else if (dialogs_show_question("'%s' already exists. Continue?\n- If you are renaming a file to an existing one, the existing one will be overwritten.\n- If you are renaming a folder to an existing one, an error will be returned.", reto)) {
+										goto rename;
+									} else {
+										goto end;
+									}
+									rename:
 									if (IS_CURRENT_PROFILE_SFTP)
 										add_pending_item(3, name, g_strdup_printf("rename \"/%s%s\" \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname), quote_add_slash(name), quote_add_slash(reto)));
 									else
 										add_pending_item(3, name, g_strdup_printf("RNFR %s\nRNTO %s", dirname, reto));
 									if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
 								}
+								end:
 								g_free(reto);
 							}
 							g_free(dirname);
@@ -2573,7 +2622,7 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
 	return FALSE;
 }
 
-static gboolean on_key_release(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
+static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
 {
 	switch (event->keyval) {
 		case 0xff0d:
@@ -2592,7 +2641,14 @@ static gboolean on_key_release(GtkWidget *widget, GdkEventKey *event, gpointer u
 					if (event->keyval == 0xff53) {
 						gtk_tree_view_expand_row(GTK_TREE_VIEW(file_view), list->data, TRUE);
 					} else if (event->keyval == 0xff51) {
-						gtk_tree_view_collapse_row(GTK_TREE_VIEW(file_view), list->data);
+						if (gtk_tree_view_row_expanded(GTK_TREE_VIEW(file_view), list->data)) {
+							gtk_tree_view_collapse_row(GTK_TREE_VIEW(file_view), list->data);
+						} else {
+							if (gtk_tree_path_up(list->data)) {
+								gtk_tree_view_collapse_row(GTK_TREE_VIEW(file_view), list->data);
+								gtk_tree_view_set_cursor(GTK_TREE_VIEW(file_view), list->data, NULL, FALSE);
+							}
+						}
 					}
 				}
 				g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
@@ -2720,9 +2776,11 @@ static void on_browse_local_clicked(GtkButton *button, gpointer user_data)
 	gchar *path;
 	path = g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(pref.local)));
 	path = run_file_chooser("Browse local directory", GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, path);
-	gtk_entry_set_text(GTK_ENTRY(pref.local), path);
-	on_host_login_password_changed(NULL, NULL, NULL);
-	g_free(path);
+	if (path) {
+		gtk_entry_set_text(GTK_ENTRY(pref.local), path);
+		on_host_login_password_changed(NULL, NULL, NULL);
+		g_free(path);
+	}
 }
 
 static void on_browse_private_key_clicked(GtkButton *button, gpointer user_data)
@@ -2730,9 +2788,11 @@ static void on_browse_private_key_clicked(GtkButton *button, gpointer user_data)
 	gchar *path;
 	path = g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(pref.privatekey)));
 	path = run_file_chooser("Browse private key", GTK_FILE_CHOOSER_ACTION_OPEN, path);
-	gtk_entry_set_text(GTK_ENTRY(pref.privatekey), path);
-	on_host_login_password_changed(NULL, NULL, NULL);
-	g_free(path);
+	if (path) {
+		gtk_entry_set_text(GTK_ENTRY(pref.privatekey), path);
+		on_host_login_password_changed(NULL, NULL, NULL);
+		g_free(path);
+	}
 }
 
 static void on_use_anonymous_toggled(GtkToggleButton *togglebutton, gpointer user_data)
@@ -2799,20 +2859,20 @@ static void on_edit_profiles_changed(void)
 		if (g_strcmp0(name, host)!=0)
 		g_object_set_data(G_OBJECT(pref.name), "name-edited", (gpointer)TRUE);
 	}
-	gtk_entry_set_text(GTK_ENTRY(pref.name), name);
-	gtk_entry_set_text(GTK_ENTRY(pref.host), host);
-	gtk_entry_set_text(GTK_ENTRY(pref.port), port);
-	gtk_entry_set_text(GTK_ENTRY(pref.login), login);
-	gtk_entry_set_text(GTK_ENTRY(pref.passwd), password);
-	gtk_entry_set_text(GTK_ENTRY(pref.remote), remote);
-	gtk_entry_set_text(GTK_ENTRY(pref.local), local);
-	gtk_entry_set_text(GTK_ENTRY(pref.webhost), webhost);
-	gtk_entry_set_text(GTK_ENTRY(pref.prefix), prefix);
+	if (name) gtk_entry_set_text(GTK_ENTRY(pref.name), name);
+	if (host) gtk_entry_set_text(GTK_ENTRY(pref.host), host);
+	if (port) gtk_entry_set_text(GTK_ENTRY(pref.port), port);
+	if (login) gtk_entry_set_text(GTK_ENTRY(pref.login), login);
+	if (password) gtk_entry_set_text(GTK_ENTRY(pref.passwd), password);
+	if (remote) gtk_entry_set_text(GTK_ENTRY(pref.remote), remote);
+	if (local) gtk_entry_set_text(GTK_ENTRY(pref.local), local);
+	if (webhost) gtk_entry_set_text(GTK_ENTRY(pref.webhost), webhost);
+	if (prefix) gtk_entry_set_text(GTK_ENTRY(pref.prefix), prefix);
 	g_signal_handler_block(pref.auth, pref.auth_handler_id);
 	gtk_combo_box_set_active(GTK_COMBO_BOX(pref.auth), to_auth_type(auth));
 	check_private_key_browse_sensitive();
 	g_signal_handler_unblock(pref.auth, pref.auth_handler_id);
-	gtk_entry_set_text(GTK_ENTRY(pref.privatekey), privatekey);
+	if (privatekey) gtk_entry_set_text(GTK_ENTRY(pref.privatekey), privatekey);
 	g_free(name);
 	g_free(host);
 	g_free(port);
@@ -2893,13 +2953,15 @@ static gchar* new_names(gchar *name)
 	
 	while (valid) {
 		gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 0, &names, -1);
-		names = g_strstrip(names);
-		g_regex_match(regex, names, 0, &match_info);
-		if (g_match_info_matches(match_info)) {
-			num = g_ascii_strtoll(g_match_info_fetch(match_info, 1), NULL, 0);
-			nums = g_slist_remove_all(nums, (gpointer)num);
+		if (names) {
+			names = g_strstrip(names);
+			g_regex_match(regex, names, 0, &match_info);
+			if (g_match_info_matches(match_info)) {
+				num = g_ascii_strtoll(g_match_info_fetch(match_info, 1), NULL, 0);
+				nums = g_slist_remove_all(nums, (gpointer)num);
+			}
+			g_free(names);
 		}
-		g_free(names);
 		valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(pref.store), &iter);
 	}
 	
@@ -2917,15 +2979,19 @@ static gchar* new_names(gchar *name)
 static void on_profile_organize_clicked(GtkToolButton *toolbutton, gpointer p)
 {
 	GtkTreePath *path;
+	GtkTreePath *pathx;
 	gtk_tree_view_get_cursor(GTK_TREE_VIEW(pref.p_view), &path, NULL);
-	g_return_if_fail(path!=NULL);
+	if (path==NULL) return;
 	gtk_tree_path_next(path);
 	gtk_tree_path_next(path);
 	GtkTreeIter iter;
 	GtkTreeIter iter2;
 	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter, gtk_tree_path_to_string(path));
+	int n = gtk_tree_model_iter_n_children(gtk_tree_view_get_model(GTK_TREE_VIEW(pref.p_view)),NULL);
 	switch ((int)p) {
 		case 1:
+			pathx = gtk_tree_path_new_from_string("0");
+			gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(pref.p_view), pathx, NULL, FALSE, 0.0, 0.0);
 			gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter2, "2");
 			gtk_list_store_move_before(GTK_LIST_STORE(pref.store), &iter, &iter2);
 			break;
@@ -2933,14 +2999,23 @@ static void on_profile_organize_clicked(GtkToolButton *toolbutton, gpointer p)
 			if (g_strcmp0(gtk_tree_path_to_string(path),"2")!=0 && gtk_tree_path_prev(path)) {
 				gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter2, gtk_tree_path_to_string(path));
 				gtk_list_store_move_before(GTK_LIST_STORE(pref.store), &iter, &iter2);
+				gtk_tree_path_prev(path);
+				gtk_tree_path_prev(path);
+				gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(pref.p_view), path, NULL, FALSE, 0.0, 0.0);
 			}
 			break;
 		case 3:
+			gtk_tree_path_prev(path);
+			gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(pref.p_view), path, NULL, FALSE, 0.0, 0.0);
+			gtk_tree_path_next(path);
 			gtk_tree_path_next(path);
 			gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter2, gtk_tree_path_to_string(path));
-			gtk_list_store_move_after(GTK_LIST_STORE(pref.store), &iter, &iter2);
+			if (gtk_list_store_iter_is_valid(GTK_LIST_STORE(pref.store), &iter2))
+				gtk_list_store_move_after(GTK_LIST_STORE(pref.store), &iter, &iter2);
 			break;
 		case 4:
+			pathx = gtk_tree_path_new_from_string(g_strdup_printf("%d", n-1));
+			gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(pref.p_view), pathx, NULL, FALSE, 0.0, 0.0);
 			gtk_list_store_move_before(GTK_LIST_STORE(pref.store), &iter, NULL);
 			break;
 		case 5: {
@@ -2953,7 +3028,6 @@ static void on_profile_organize_clicked(GtkToolButton *toolbutton, gpointer p)
 				gint i;
 				GValue val = {0};
 				for (i=1; i<gtk_tree_model_get_n_columns(GTK_TREE_MODEL(pref.store)); i++) {
-					g_value_init(&val, gtk_tree_model_get_column_type(GTK_TREE_MODEL(pref.store), i+1));
 					gtk_tree_model_get_value(GTK_TREE_MODEL(pref.store), &iter, i, &val);
 					gtk_list_store_set_value(pref.store, &iter_new, i, &val);
 					g_value_unset(&val);
@@ -2964,8 +3038,8 @@ static void on_profile_organize_clicked(GtkToolButton *toolbutton, gpointer p)
 			break;
 		case 6:
 			gtk_list_store_remove(GTK_LIST_STORE(pref.store), &iter);
-			int n = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pref.store), NULL) - 2;
-			if (n<=0) {
+			int n2 = gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pref.store), NULL) - 2;
+			if (n2<=0) {
 				gtk_combo_box_set_active(GTK_COMBO_BOX(pref.combo), 0);
 			} else {
 				gtk_tree_path_prev(path);
@@ -2973,7 +3047,7 @@ static void on_profile_organize_clicked(GtkToolButton *toolbutton, gpointer p)
 				gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter, gtk_tree_path_to_string(path));
 				gtk_tree_model_iter_next(GTK_TREE_MODEL(pref.store), &iter);
 				if (!gtk_tree_model_iter_next(GTK_TREE_MODEL(pref.store), &iter))
-					path = gtk_tree_path_new_from_string(g_strdup_printf("%d", n-1));
+					path = gtk_tree_path_new_from_string(g_strdup_printf("%d", n2-1));
 				gtk_tree_view_set_cursor(GTK_TREE_VIEW(pref.p_view), path, NULL, FALSE);
 				
 			}
@@ -3062,7 +3136,6 @@ static void on_organize_profile_clicked(GtkButton *button, gpointer p)
 	widget = gtk_scrolled_window_new(NULL, NULL);
 	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(widget),	GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
 	gtk_container_add(GTK_CONTAINER(widget), pref.p_view);
-	gtk_scrolled_window_add_with_viewport(GTK_SCROLLED_WINDOW(widget), pref.p_view);
 	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(widget), GTK_SHADOW_IN);
 	gtk_widget_set_size_request(widget, 250, 300);
 	
@@ -3133,12 +3206,16 @@ static void on_configure_response(GtkDialog *dialog, gint response, gpointer use
 		current_settings.autoreload = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.autoreload));
 		current_settings.cache = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.cache));
 		current_settings.showhiddenfiles = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.showhiddenfiles));
-		g_signal_handler_block(popup.cdl, popup.cdl_handler_id);
-		gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(popup.cdl), current_settings.cache);
-		g_signal_handler_unblock(popup.cdl, popup.cdl_handler_id);
-		g_signal_handler_block(popup.shf, popup.shf_handler_id);
-		gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(popup.shf), current_settings.showhiddenfiles);
-		g_signal_handler_unblock(popup.shf, popup.shf_handler_id);
+		if (popup.cdl) {
+			g_signal_handler_block(popup.cdl, popup.cdl_handler_id);
+			gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(popup.cdl), current_settings.cache);
+			g_signal_handler_unblock(popup.cdl, popup.cdl_handler_id);
+		}
+		if (popup.shf) {
+			g_signal_handler_block(popup.shf, popup.shf_handler_id);
+			gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(popup.shf), current_settings.showhiddenfiles);
+			g_signal_handler_unblock(popup.shf, popup.shf_handler_id);
+		}
 		current_settings.enable_hosts = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.enable_hosts));
 		current_settings.confirm_delete = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.confirm_delete));
 
@@ -3295,7 +3372,7 @@ static void prepare_file_view()
 	gtk_tree_view_set_tooltip_column(GTK_TREE_VIEW(file_view), FILEVIEW_COLUMN_INFO);
 	
 	g_signal_connect(file_view, "button-press-event", G_CALLBACK(on_button_press), NULL);
-	g_signal_connect(file_view, "key-release-event", G_CALLBACK(on_key_release), NULL);
+	g_signal_connect(file_view, "key-press-event", G_CALLBACK(on_key_press), NULL);
 	
 	const GtkTargetEntry drag_dest_types[] = {
 		{ "STRING",			0, 0 },
@@ -3369,6 +3446,8 @@ static void prepare_pending_view()
 	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(pending_view), TRUE);
 	
 	pango_font_description_free(pfd);
+	
+	g_timeout_add(100, (GSourceFunc)current_pending_progress, NULL);
 }
 
 static gboolean focus_widget(gpointer p)
