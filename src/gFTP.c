@@ -191,6 +191,20 @@ static int ftp_log(CURL *handle, curl_infotype type, gchar *data, size_t size, v
 	return 0;
 }
 
+static int ftp_log_for_getting_server_time(CURL *handle, curl_infotype type, gchar *data, size_t size, void *userp)
+{
+	gchar *odata;
+	odata = g_strstrip(g_strdup_printf("%s", data));
+	gchar *firstline;
+	firstline = strtok(odata,"\r\n");
+	if (firstline==NULL) return 0;
+	if (!g_utf8_validate(firstline, -1, NULL)) return 0;
+	gdk_threads_enter();
+	gtk_label_set_label(GTK_LABEL(pref.gst_text), firstline);
+	gdk_threads_leave();
+	return 0;
+}
+
 static gchar *find_host (gchar *src)
 {
 	if (current_settings.enable_hosts) {
@@ -302,7 +316,14 @@ static int add_item(gpointer data, gboolean is_dir)
 	gchar *tsize = g_format_size_for_display(size);
 	gchar buffer[80];
 	time_t mod_time = g_ascii_strtoll(parts[2], NULL, 0);
-	strftime(buffer, 80, "%Y-%m-%d %H:%M:%S (%A)", gmtime(&mod_time));
+	struct tm *gm = gmtime(&mod_time);
+	if (current_profile.timeoffset_hr!=0 || current_profile.timeoffset_min!=0) {
+		gm->tm_hour += current_profile.timeoffset_hr;
+		gm->tm_min += current_profile.timeoffset_min;
+		mod_time = timegm(gm);
+		gm = gmtime(&mod_time);
+	}
+	strftime(buffer, 80, "%Y-%m-%d %H:%M:%S (%A)", gm);
 	gtk_tree_store_set(file_store, &iter,
 	FILEVIEW_COLUMN_ICON, is_dir?GTK_STOCK_DIRECTORY:GTK_STOCK_FILE, 
 	FILEVIEW_COLUMN_NAME, parts[0], 
@@ -982,7 +1003,6 @@ static void *upload_file(gpointer p)
 	GList *ul = (GList *)p;
 	GString *ulfrom = g_string_new((gchar *)g_list_nth_data(ul, 0));
 	GString *ulto = g_string_new((gchar *)g_list_nth_data(ul, 1));
-	printf("%s", ulto->str);
 	struct uploadf file;
 	g_get_current_time(&file.prev_t);
 	if (curl) {
@@ -1053,6 +1073,163 @@ static void *create_file(gpointer p)
 	execute_end(55);
 	gdk_threads_leave();
 	g_thread_exit(NULL);
+	return NULL;
+}
+
+static void *get_server_time(gpointer p)
+{
+	gchar *dn = g_strdup_printf("%s/", g_path_get_dirname(current_profile.remote));
+	if (g_strcmp0(dn, "./")==0)	dn = g_strdup("");
+	GString *fn = g_string_new("");
+	gint buf = 500000;
+	gchar *sha1;
+	gchar *ulto;
+	glong modtime;
+	glong difftime;
+	CURLcode code;
+	struct curl_slist *headers = NULL;
+	if (curl) {
+		curl_easy_reset(curl);
+		proxy_config();
+		auth_config();
+		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log_for_getting_server_time);
+		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
+		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+		curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_SINGLECWD);
+		curl_easy_setopt(curl, CURLOPT_FILETIME, 1L);
+		curl_easy_setopt(curl, CURLOPT_UPLOAD, 0L);
+		curl_easy_setopt(curl, CURLOPT_POSTQUOTE, NULL);
+		
+		again:
+		g_string_assign(fn, g_strdup_printf("%ld", time(NULL)));
+		sha1 = g_compute_checksum_for_string(G_CHECKSUM_SHA1, fn->str, fn->len);
+		gdk_threads_enter();
+		gtk_progress_bar_set_text(GTK_PROGRESS_BAR(pref.gst_progress), g_strdup_printf("Checking %s...", sha1));
+		gdk_threads_leave();
+		g_usleep(buf);
+		ulto = g_strconcat(current_profile.url, dn, sha1, NULL);
+		curl_easy_setopt(curl, CURLOPT_URL, ulto);
+		code = curl_easy_perform(curl);
+		if (code==19 || code==78) { //file not exist, OK (err code 78 usually in SFTP)
+			gdk_threads_enter();
+			gtk_progress_bar_set_text(GTK_PROGRESS_BAR(pref.gst_progress), g_strdup_printf("Creating %s...", sha1));
+			gdk_threads_leave();
+			g_usleep(buf);
+			curl_easy_setopt(curl, CURLOPT_FILETIME, 0L);
+			curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+			curl_easy_setopt(curl, CURLOPT_POSTQUOTE, NULL);
+			code = curl_easy_perform(curl);
+			if (code==0) {
+				if (IS_CURRENT_PROFILE_SFTP) {
+					gchar *temploc = g_strdup_printf("/tmp/%s", sha1);
+					FILE *fp;
+					fp=fopen(temploc,"wb");
+					curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_data);
+					curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+					curl_easy_setopt(curl, CURLOPT_FILETIME, 0L);
+					curl_easy_setopt(curl, CURLOPT_UPLOAD, 0L);
+					code = curl_easy_perform(curl);
+					fclose(fp);
+					if (code!=0) goto error;
+					curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, NULL);
+					curl_easy_setopt(curl, CURLOPT_WRITEDATA, NULL);
+					struct stat st;
+					if (stat(temploc, &st)==0){
+						modtime = st.st_mtim.tv_sec;
+					} else {
+						goto error;
+					}
+					GFile *file;
+					file = g_file_new_for_path(temploc);
+					g_file_delete(file, NULL, NULL);
+					g_object_unref(file);
+				} else {
+					curl_easy_setopt(curl, CURLOPT_FILETIME, 1L);
+					curl_easy_setopt(curl, CURLOPT_UPLOAD, 0L);
+					curl_easy_setopt(curl, CURLOPT_POSTQUOTE, NULL);
+					code = curl_easy_perform(curl);
+					if (code!=0) goto error;
+					curl_easy_getinfo(curl, CURLINFO_FILETIME, &modtime);
+				}
+				gdk_threads_enter();
+				gtk_progress_bar_set_text(GTK_PROGRESS_BAR(pref.gst_progress), g_strdup_printf("%s Created.", sha1));
+				gdk_threads_leave();
+				g_usleep(buf);
+				if (modtime!=-1) {
+					GString *str;
+					str = g_string_new("");
+					ulto = g_strconcat(current_profile.url, dn, NULL);
+					curl_easy_setopt(curl, CURLOPT_URL, ulto);
+					curl_easy_setopt(curl, CURLOPT_FILETIME, 0L);
+					curl_easy_setopt(curl, CURLOPT_UPLOAD, 0L);
+					curl_easy_setopt(curl, CURLOPT_POSTQUOTE, NULL);
+					curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_function);
+					curl_easy_setopt(curl, CURLOPT_WRITEDATA, str);
+					code = curl_easy_perform(curl);
+					if (code!=0) goto error;
+					difftime = G_MAXULONG;
+					gchar *pch;
+					pch = strtok(str->str, "\r\n");
+					struct ftpparse ftp;
+					while (pch != NULL)
+					{
+						if (ftp_parse(&ftp, pch, strlen(pch))) {
+							if (g_strcmp0(ftp.name, sha1)==0) {
+								difftime = modtime - ftp.mtime;
+								break;
+							}
+						}
+						pch = strtok(NULL, "\r\n");
+					}
+					if (difftime == G_MAXULONG) goto error;
+					gdk_threads_enter();
+					time_t t, lt, gt, dt;
+					t = time(NULL);
+					lt = mktime(localtime(&t));
+					gt = mktime(gmtime(&t));
+					dt = difftime + lt - gt;
+					struct tm *dtime = gmtime(&dt);
+					gtk_spin_button_set_value(GTK_SPIN_BUTTON(pref.timeoffset_hr), (gdouble)dtime->tm_hour);
+					gtk_spin_button_set_value(GTK_SPIN_BUTTON(pref.timeoffset_min), (gdouble)dtime->tm_min);
+					gtk_progress_bar_set_text(GTK_PROGRESS_BAR(pref.gst_progress), "Time Offset Set. Waiting to delete the file...");
+					gdk_threads_leave();
+					g_usleep(buf);
+				} else {
+					goto error;
+				}
+				if (IS_CURRENT_PROFILE_SFTP)
+					headers = curl_slist_append(headers, g_strdup_printf("rm \"%s\"", sha1));
+				else
+					headers = curl_slist_append(headers, g_strdup_printf("DELE %s", sha1));
+				curl_easy_setopt(curl, CURLOPT_FILETIME, 0L);
+				curl_easy_setopt(curl, CURLOPT_UPLOAD, 0L);
+				curl_easy_setopt(curl, CURLOPT_POSTQUOTE, headers);
+				code = curl_easy_perform(curl);
+				gdk_threads_enter();
+				if (code==0) {
+					gtk_progress_bar_set_text(GTK_PROGRESS_BAR(pref.gst_progress), g_strdup_printf("%s Deleted.", sha1));
+				} else {
+					gtk_progress_bar_set_text(GTK_PROGRESS_BAR(pref.gst_progress), g_strdup_printf("Error deleting %s.", sha1));
+				}
+				gdk_threads_leave();
+				g_usleep(buf);
+				curl_slist_free_all(headers);
+				goto end;
+			}
+		} else if (code==0) { //file exist, choose another name
+			goto again;
+		} else { //connection problem, exit
+			//go on.
+		}
+	}
+	error:
+	gdk_threads_enter();
+	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(pref.gst_progress), "Error occurred.");
+	g_usleep(buf*2);
+	dialogs_show_msgbox(GTK_MESSAGE_WARNING, "You may need to set the time offset by yourself.");
+	gdk_threads_leave();
+	end:
+	gtk_dialog_response(GTK_DIALOG(p), GTK_RESPONSE_CANCEL);
 	return NULL;
 }
 
@@ -1223,6 +1400,9 @@ static void *send_command(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_URL, find_host((gchar *)url));
 		proxy_config();
 		auth_config();
+		GString *str = g_string_new("");
+		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_function);
+		curl_easy_setopt(curl, CURLOPT_WRITEDATA, str);
 		curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, normal_progress);
 		curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
 		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
@@ -1445,13 +1625,17 @@ static void to_use_proxy(GtkMenuItem *menuitem, int p)
 	}
 }
 
-static void to_connect(GtkMenuItem *menuitem, int p)
+static void to_load_current_profile(int p)
 {
 	to_abort = FALSE;
 	current_profile.working_directory = "";
 	current_profile.cert = "";
-	current_profile.index = p;
-	load_profiles(2);
+	if (p>-1) {
+		current_profile.index = p;
+		load_profiles(2);
+	} else {
+		load_profiles(3);
+	}
 	current_profile.url=g_strdup_printf("%s", current_profile.host);
 	current_profile.url=g_strstrip(current_profile.url);
 	if (!g_regex_match_simple("^s?ftp://", current_profile.url, G_REGEX_CASELESS, 0)) {
@@ -1466,13 +1650,23 @@ static void to_connect(GtkMenuItem *menuitem, int p)
 	if (!g_str_has_suffix(current_profile.url, "/")) {
 		current_profile.url=g_strconcat(current_profile.url, "/", NULL);
 	}
-	
+}
+
+static void to_init_msgwin(gchar *newmsg)
+{
 	gtk_paned_set_position(GTK_PANED(ui_lookup_widget(geany->main_widgets->window, "vpaned1")), 
 		geany->main_widgets->window->allocation.height - 250);
 	
 	msgwin_clear_tab(MSG_MESSAGE);
 	msgwin_switch_tab(MSG_MESSAGE, TRUE);
-	log_new_str(COLOR_BLUE, "Initializing...");
+	log_new_str(COLOR_BLUE, newmsg);
+}
+
+static void to_connect(GtkMenuItem *menuitem, int p)
+{
+	to_load_current_profile(p);
+	
+	to_init_msgwin("Initializing...");
 	
 	GtkTreeIter iter;
 	gtk_tree_store_append(file_store, &iter, NULL);
@@ -1709,11 +1903,15 @@ static void load_profiles(gint type)
 			gsize i;
 			gchar *name;
 			gchar *host;
+			gboolean a_load_on_startup;
+			gint b_load_on_startup = -1;
 			for (i = 0; i < all_profiles_length; i++) {
 				name = utils_get_setting_string(profiles, all_profiles[i], "name", "");
 				host = utils_get_setting_string(profiles, all_profiles[i], "host", "");
 				if (g_utf8_strlen(host, -1)>0) {
 					if (g_utf8_strlen(name, -1)==0) name = g_strdup(host);
+					a_load_on_startup = utils_get_setting_boolean(profiles, all_profiles[i], "load_on_startup", FALSE);
+					if (a_load_on_startup) b_load_on_startup += 1;
 					gtk_list_store_append(GTK_LIST_STORE(pref.store), &iter);
 					gtk_list_store_set(GTK_LIST_STORE(pref.store), &iter, 
 					0, name, 
@@ -1727,6 +1925,9 @@ static void load_profiles(gint type)
 					8, utils_get_setting_string(profiles, all_profiles[i], "prefix", ""), 
 					9, utils_get_setting_string(profiles, all_profiles[i], "auth", ""), 
 					10, utils_get_setting_string(profiles, all_profiles[i], "privatekey", ""), 
+					11, utils_get_setting_integer(profiles, all_profiles[i], "timeoffset_hr", 0), 
+					12, utils_get_setting_integer(profiles, all_profiles[i], "timeoffset_min", 0), 
+					13, b_load_on_startup>0?FALSE:a_load_on_startup, 
 					-1);
 				}
 				g_free(name);
@@ -1749,6 +1950,27 @@ static void load_profiles(gint type)
 			current_profile.prefix = utils_get_setting_string(profiles, all_profiles[i], "prefix", "");
 			current_profile.auth = utils_get_setting_string(profiles, all_profiles[i], "auth", "");
 			current_profile.privatekey = utils_get_setting_string(profiles, all_profiles[i], "privatekey", "");
+			current_profile.timeoffset_hr = utils_get_setting_integer(profiles, all_profiles[i], "timeoffset_hr", 0);
+			current_profile.timeoffset_min = utils_get_setting_integer(profiles, all_profiles[i], "timeoffset_min", 0);
+			current_profile.load_on_startup = utils_get_setting_boolean(profiles, all_profiles[i], "load_on_startup", FALSE);
+			break;
+		}
+		case 3:{ //temp load
+			current_profile.name = g_strdup("");
+			current_profile.host = g_strdup(gtk_entry_get_text(GTK_ENTRY(pref.host)));
+			current_profile.port = g_strdup(gtk_entry_get_text(GTK_ENTRY(pref.port)));
+			current_profile.login = g_strdup(gtk_entry_get_text(GTK_ENTRY(pref.login)));
+			current_profile.password = g_strdup(gtk_entry_get_text(GTK_ENTRY(pref.passwd)));
+			current_profile.remote = g_strdup(gtk_entry_get_text(GTK_ENTRY(pref.remote)));
+			current_profile.local = g_strdup("");
+			current_profile.webhost = g_strdup("");
+			current_profile.prefix = g_strdup("");
+			current_profile.auth = g_strdup(gtk_combo_box_get_active_text(GTK_COMBO_BOX(pref.auth)));
+			current_profile.privatekey = g_strdup(gtk_entry_get_text(GTK_ENTRY(pref.privatekey)));
+			current_profile.timeoffset_hr = 0;
+			current_profile.timeoffset_min = 0;
+			current_profile.load_on_startup = FALSE;
+			break;
 		}
 	}
 	g_key_file_free(profiles);
@@ -1797,6 +2019,9 @@ static void save_profiles(gint type)
 			gchar *prefix = NULL;
 			gchar *auth = NULL;
 			gchar *privatekey = NULL;
+			gint timeoffset_hr = 0;
+			gint timeoffset_min = 0;
+			gboolean load_on_startup = FALSE;
 			while (valid) {
 				gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 
 				0, &name, 
@@ -1810,6 +2035,9 @@ static void save_profiles(gint type)
 				8, &prefix, 
 				9, &auth, 
 				10, &privatekey, 
+				11, &timeoffset_hr, 
+				12, &timeoffset_min, 
+				13, &load_on_startup, 
 				-1);
 				name = g_strstrip(name);
 				host = g_strstrip(host);
@@ -1825,7 +2053,7 @@ static void save_profiles(gint type)
 					auth = g_strstrip(auth);
 					privatekey = g_strstrip(privatekey);
 					unique_id = g_strconcat(name, "\n", host, "\n", port, "\n", login, "\n", 
-					password, "\n", remote, "\n", local, "\n", webhost, "\n", prefix, "\n", auth, "\n", privatekey, NULL);
+					password, "\n", remote, "\n", local, "\n", webhost, "\n", prefix, "\n", auth, "\n", privatekey, g_strdup_printf("\n%d\n%d\n%d", timeoffset_hr, timeoffset_min, load_on_startup), NULL);
 					unique_id = g_compute_checksum_for_string(G_CHECKSUM_MD5, unique_id, g_utf8_strlen(unique_id, -1));
 					g_key_file_set_string(profiles, unique_id, "name", name);
 					g_key_file_set_string(profiles, unique_id, "host", host);
@@ -1838,6 +2066,9 @@ static void save_profiles(gint type)
 					g_key_file_set_string(profiles, unique_id, "prefix", prefix);
 					g_key_file_set_string(profiles, unique_id, "auth", auth);
 					g_key_file_set_string(profiles, unique_id, "privatekey", privatekey);
+					g_key_file_set_integer(profiles, unique_id, "timeoffset_hr", timeoffset_hr);
+					g_key_file_set_integer(profiles, unique_id, "timeoffset_min", timeoffset_min);
+					g_key_file_set_boolean(profiles, unique_id, "load_on_startup", load_on_startup);
 					g_free(unique_id);
 					g_free(port);
 					g_free(login);
@@ -1870,6 +2101,9 @@ static void save_profiles(gint type)
 			g_key_file_set_string(profiles, all_profiles[i], "prefix", current_profile.prefix);
 			g_key_file_set_string(profiles, all_profiles[i], "auth", current_profile.auth);
 			g_key_file_set_string(profiles, all_profiles[i], "privatekey", current_profile.privatekey);
+			g_key_file_set_integer(profiles, all_profiles[i], "timeoffset_hr", current_profile.timeoffset_hr);
+			g_key_file_set_integer(profiles, all_profiles[i], "timeoffset_min", current_profile.timeoffset_min);
+			g_key_file_set_boolean(profiles, all_profiles[i], "load_on_startup", current_profile.load_on_startup);
 			break;
 		}
 	}
@@ -2705,6 +2939,9 @@ static void *on_host_login_password_changed(GtkWidget *widget, GdkEventKey *even
 	8, gtk_entry_get_text(GTK_ENTRY(pref.prefix)), 
 	9, gtk_combo_box_get_active_text(GTK_COMBO_BOX(pref.auth)), 
 	10, gtk_entry_get_text(GTK_ENTRY(pref.privatekey)), 
+	11, (gint)gtk_spin_button_get_value(GTK_SPIN_BUTTON(pref.timeoffset_hr)), 
+	12, (gint)gtk_spin_button_get_value(GTK_SPIN_BUTTON(pref.timeoffset_min)), 
+	13, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.load_on_startup)), 
 	-1);
 	gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &pref.iter_store_new);
 	return FALSE;
@@ -2821,6 +3058,31 @@ static void on_auth_changed(void)
 	check_private_key_browse_sensitive();
 }
 
+static void on_timeoffset_changed(void)
+{
+	on_host_login_password_changed(NULL, NULL, NULL);
+}
+
+static void on_load_on_startup_changed(void)
+{
+	on_host_login_password_changed(NULL, NULL, NULL);
+	GtkTreeModel *model;
+	model = gtk_combo_box_get_model(GTK_COMBO_BOX(pref.combo));
+	GtkTreeIter iter;
+	gboolean valid;
+	gboolean load_on_startup;
+	valid = gtk_tree_model_get_iter_from_string(model, &iter, "2");
+	while (valid) {
+		if (g_strcmp0(gtk_tree_model_get_string_from_iter(model, &pref.iter_store_new),gtk_tree_model_get_string_from_iter(model, &iter))!=0) {
+			gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 13, &load_on_startup, -1);
+			if (load_on_startup==TRUE) {
+				gtk_list_store_set(pref.store, &iter, 13, FALSE, -1);
+			}
+		}
+		valid = gtk_tree_model_iter_next(model, &iter);
+	}
+}
+
 static void on_edit_profiles_changed(void)
 {
 	GtkTreeIter iter;
@@ -2837,6 +3099,9 @@ static void on_edit_profiles_changed(void)
 	gchar *prefix = g_strdup_printf("%s", "");
 	gchar *auth = g_strdup_printf("%s", "");
 	gchar *privatekey = g_strdup_printf("%s", "");
+	gint timeoffset_hr = 0;
+	gint timeoffset_min = 0;
+	gboolean load_on_startup = FALSE;
 	if (is_edit_profiles_selected_nth_item(&iter, "0")) {
 		g_object_set_data(G_OBJECT(pref.name), "name-edited", (gpointer)FALSE);
 		focus_widget(pref.host);
@@ -2854,6 +3119,9 @@ static void on_edit_profiles_changed(void)
 			8, &prefix, 
 			9, &auth, 
 			10, &privatekey, 
+			11, &timeoffset_hr, 
+			12, &timeoffset_min, 
+			13, &load_on_startup, 
 			-1);
 		}
 		if (g_strcmp0(name, host)!=0)
@@ -2868,6 +3136,15 @@ static void on_edit_profiles_changed(void)
 	if (local) gtk_entry_set_text(GTK_ENTRY(pref.local), local);
 	if (webhost) gtk_entry_set_text(GTK_ENTRY(pref.webhost), webhost);
 	if (prefix) gtk_entry_set_text(GTK_ENTRY(pref.prefix), prefix);
+	g_signal_handler_block(pref.timeoffset_hr, pref.toh_handler_id);
+	g_signal_handler_block(pref.timeoffset_min, pref.tom_handler_id);
+	g_signal_handler_block(pref.load_on_startup, pref.los_handler_id);
+	gtk_spin_button_set_value(GTK_SPIN_BUTTON(pref.timeoffset_hr), timeoffset_hr?timeoffset_hr:0);
+	gtk_spin_button_set_value(GTK_SPIN_BUTTON(pref.timeoffset_min), timeoffset_min?timeoffset_min:0);
+	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(pref.load_on_startup), !(!load_on_startup));
+	g_signal_handler_unblock(pref.timeoffset_hr, pref.toh_handler_id);
+	g_signal_handler_unblock(pref.timeoffset_min, pref.tom_handler_id);
+	g_signal_handler_unblock(pref.load_on_startup, pref.los_handler_id);
 	g_signal_handler_block(pref.auth, pref.auth_handler_id);
 	gtk_combo_box_set_active(GTK_COMBO_BOX(pref.auth), to_auth_type(auth));
 	check_private_key_browse_sensitive();
@@ -2976,6 +3253,13 @@ static gchar* new_names(gchar *name)
 	return oname;
 }
 
+static gboolean progress_bar_pulse(GtkWidget *widget)
+{
+	if (!widget) return FALSE;
+	gtk_progress_bar_pulse(GTK_PROGRESS_BAR(widget));
+	return TRUE;
+}
+
 static void on_profile_organize_clicked(GtkToolButton *toolbutton, gpointer p)
 {
 	GtkTreePath *path;
@@ -3032,6 +3316,7 @@ static void on_profile_organize_clicked(GtkToolButton *toolbutton, gpointer p)
 					gtk_list_store_set_value(pref.store, &iter_new, i, &val);
 					g_value_unset(&val);
 				}
+				gtk_list_store_set(pref.store, &iter_new, 13, FALSE, -1); //set load_on_startup to FALSE
 				gtk_tree_path_prev(path); //because first 2 rows are hidden in p_view
 				gtk_tree_view_set_cursor(GTK_TREE_VIEW(pref.p_view), path, NULL, FALSE);
 			}
@@ -3152,6 +3437,61 @@ static void on_organize_profile_clicked(GtkButton *button, gpointer p)
 	gtk_widget_destroy(dialog);
 }
 
+static void on_get_server_time_response(GtkDialog *dialog, gint response, gpointer user_data)
+{
+	to_load_current_profile(current_profile.index);
+	if (pref.curl_initialized)
+		curl_easy_reset(curl);
+	else
+		curl = NULL;
+}
+
+static void on_get_server_time_clicked(GtkButton *button, gpointer p)
+{
+	if (g_utf8_strlen(gtk_entry_get_text(GTK_ENTRY(pref.host)), -1)==0) {
+		dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Please input hostname first.");
+		gtk_widget_grab_focus(pref.host);
+		return;
+	}
+	GtkWidget *dialog, *vbox, *widget;
+	dialog = gtk_dialog_new_with_buttons("Getting Server Time", GTK_WINDOW(p),
+		GTK_DIALOG_DESTROY_WITH_PARENT | GTK_DIALOG_NO_SEPARATOR, 
+		NULL);
+	gtk_window_set_resizable(GTK_WINDOW(dialog), FALSE);
+	vbox = ui_dialog_vbox_new(GTK_DIALOG(dialog));
+	GdkPixbuf *pb = gtk_window_get_icon(GTK_WINDOW(geany->main_widgets->window));
+	gtk_window_set_icon(GTK_WINDOW(dialog), pb);
+	
+	gtk_box_set_spacing(GTK_BOX(vbox), 6);
+	
+	widget = gtk_progress_bar_new();
+	gtk_widget_set_size_request(widget, 500, 30);
+	gtk_progress_bar_pulse(GTK_PROGRESS_BAR(widget));
+	gtk_progress_bar_set_text(GTK_PROGRESS_BAR(widget), "Initializing...");
+	g_timeout_add(200, (GSourceFunc)progress_bar_pulse, widget);
+	pref.gst_progress = widget;
+	
+	to_load_current_profile(-1);
+	
+	pref.curl_initialized = !(!curl);
+	if (!curl) curl = curl_easy_init();
+	g_thread_create(&get_server_time, dialog, FALSE, NULL);
+
+	gtk_box_pack_start(GTK_BOX(vbox), widget, FALSE, FALSE, 0);
+	
+	widget = gtk_label_new("Please wait...");
+	gtk_label_set_ellipsize(GTK_LABEL(widget), PANGO_ELLIPSIZE_END);
+	gtk_box_pack_start(GTK_BOX(vbox), widget, FALSE, FALSE, 0);
+	pref.gst_text = widget;
+	
+	gtk_widget_show_all(dialog);
+	
+	g_signal_connect(dialog, "response", G_CALLBACK(on_get_server_time_response), NULL);
+	
+	gtk_dialog_run(GTK_DIALOG(dialog));
+	gtk_widget_destroy(dialog);
+}
+
 static void on_delete_profile_clicked()
 {
 	GtkTreeIter iter;
@@ -3196,6 +3536,22 @@ static void on_document_save()
 		}
 		g_free(putdir);
 	}
+}
+
+static void on_auto_load_profile(GObject *obj, gpointer user_data)
+{
+	GKeyFile *profiles = g_key_file_new();
+	profiles_file = g_strconcat(geany->app->configdir, G_DIR_SEPARATOR_S, "plugins", G_DIR_SEPARATOR_S, "gFTP", G_DIR_SEPARATOR_S, "profiles.conf", NULL);
+	g_key_file_load_from_file(profiles, profiles_file, G_KEY_FILE_NONE, NULL);
+	all_profiles = g_key_file_get_groups(profiles, &all_profiles_length);
+	gint i;
+	for (i = 0; i < all_profiles_length; i++) {
+		if (utils_get_setting_boolean(profiles, all_profiles[i], "load_on_startup", FALSE)==TRUE) {
+			to_connect(NULL, i);
+			break;
+		}
+	}
+	g_key_file_free(profiles);
 }
 
 static void on_configure_response(GtkDialog *dialog, gint response, gpointer user_data)
@@ -3573,6 +3929,7 @@ void plugin_init(GeanyData *data)
 	keybindings_set_item(plugin_key_group, KB_CREATE_BLANK_FILE, kb_activate, 0x04e, GDK_SHIFT_MASK | GDK_CONTROL_MASK, "create_blank_file", "Create Blank File", NULL);
 	
 	plugin_signal_connect(geany_plugin, NULL, "document-save", TRUE, G_CALLBACK(on_document_save), NULL);
+	plugin_signal_connect(geany_plugin, NULL, "geany_startup_complete", TRUE, G_CALLBACK(on_auto_load_profile), NULL);
 }
 
 GtkWidget *plugin_configure(GtkDialog *dialog)
@@ -3584,7 +3941,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	notebook = gtk_notebook_new();
 	
 	GtkListStore *store;
-	store = gtk_list_store_new(11, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+	store = gtk_list_store_new(14, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN);
 	GtkTreeIter iter;
 	gtk_list_store_append(store, &iter);
 	gtk_list_store_set(store, &iter, 0, "New profile...", -1);
@@ -3605,7 +3962,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	
 	load_profiles(1);
 	
-	table = gtk_table_new(12, 4, FALSE);
+	table = gtk_table_new(16, 4, FALSE);
 	
 	gtk_widget_set_size_request(widget, 250, -1);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
@@ -3758,6 +4115,49 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 4, 12, 13, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), dialog);
 	pref.prefix = widget;
+	
+	widget = gtk_hseparator_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 4, 13, 14, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 4);
+	
+	widget = gtk_label_new("Time Offset");
+	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 14, 15, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	
+	hbox = gtk_hbox_new(FALSE, 6);
+	widget = gtk_spin_button_new_with_range(-24, 24, 1);
+	gtk_widget_set_size_request(widget, 50, -1);
+	gtk_spin_button_set_value(GTK_SPIN_BUTTON(widget), 0);
+	gtk_box_pack_start(GTK_BOX(hbox), widget, FALSE, FALSE, 0);
+	pref.toh_handler_id = g_signal_connect(widget, "value-changed", G_CALLBACK(on_timeoffset_changed), NULL);
+	pref.timeoffset_hr = widget;
+	
+	widget = gtk_label_new("H");
+	gtk_box_pack_start(GTK_BOX(hbox), widget, FALSE, FALSE, 0);
+	
+	widget = gtk_spin_button_new_with_range(-59, 59, 1);
+	gtk_widget_set_size_request(widget, 50, -1);
+	gtk_spin_button_set_value(GTK_SPIN_BUTTON(widget), 0);
+	gtk_box_pack_start(GTK_BOX(hbox), widget, FALSE, FALSE, 0);
+	pref.tom_handler_id = g_signal_connect(widget, "value-changed", G_CALLBACK(on_timeoffset_changed), NULL);
+	pref.timeoffset_min = widget;
+	
+	widget = gtk_label_new("M");
+	gtk_box_pack_start(GTK_BOX(hbox), widget, FALSE, FALSE, 0);
+	
+	widget = gtk_button_new_with_mnemonic("_Get Server Time Now");
+	gtk_widget_set_tooltip_text(widget, "FTP server write permission needed. Procedures: Log in -> Create a new file -> Get modification time of the new file -> Update time offset -> Delete the new file -> Done.");
+	gtk_box_pack_end(GTK_BOX(hbox), widget, FALSE, FALSE, 0);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_get_server_time_clicked), dialog);
+	gtk_widget_show_all(hbox);
+	gtk_table_attach(GTK_TABLE(table), hbox, 1, 4, 14, 15, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	
+	widget = gtk_label_new("Misc.");
+	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 15, 16, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_check_button_new_with_label("Automatically connect to this profile on startup");
+	pref.los_handler_id = g_signal_connect(widget, "toggled", G_CALLBACK(on_load_on_startup_changed), NULL);
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 4, 15, 16, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	pref.load_on_startup = widget;
 	
 	hbox = gtk_hbox_new(FALSE, 6);
 	widget = gtk_image_new_from_stock(GTK_STOCK_DND_MULTIPLE, GTK_ICON_SIZE_MENU);

@@ -84,6 +84,16 @@ static struct
 	GtkWidget *webhost;
 	GtkWidget *prefix;
 	GtkWidget *p_view;
+	GtkWidget *timeoffset_hr;
+	GtkWidget *timeoffset_min;
+	GtkWidget *load_on_startup;
+	gulong toh_handler_id;
+	gulong tom_handler_id;
+	gulong los_handler_id;
+	
+	GtkWidget *gst_progress;
+	GtkWidget *gst_text;
+	gboolean curl_initialized;
 	
 	GtkListStore *proxy_store;
 	GtkTreeIter proxy_iter_store_new;
@@ -147,6 +157,9 @@ static struct
 	gchar *auth;
 	gchar *cert;
 	gchar *privatekey;
+	gint timeoffset_hr;
+	gint timeoffset_min;
+	gboolean load_on_startup;
 } current_profile;
 
 #define IS_CURRENT_PROFILE_SFTP g_strcmp0(current_profile.auth, "SFTP")==0
