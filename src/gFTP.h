@@ -19,7 +19,7 @@ enum
 
 static GtkWidget *box, *fileview_scroll;
 static GtkWidget *file_view, *pending_view;
-static GtkTreeStore *file_store;
+static GtkTreeStore *file_store, *search_store;
 static GtkListStore *pending_store;
 static GtkTreeIter parent, current_pending;
 static CURL *curl;
@@ -56,6 +56,7 @@ static struct
 {
 	GtkWidget *connect;
 	GtkWidget *abort;
+	GtkWidget *search;
 	GtkWidget *proxy;
 	GtkWidget *preference;
 } toolbar;
@@ -128,6 +129,13 @@ static struct
 	GtkWidget *password;
 } retry;
 
+static struct
+{
+	GtkWidget *search;
+	GtkWidget *found;
+	GtkWidget *locate_selected;
+} search;
+
 static struct 
 {
 	gint cache;
@@ -191,5 +199,7 @@ static int to_auth_type(gchar *type);
 static int to_proxy_type(gchar *type);
 static gchar **parse_proxy_string(gchar *name);
 static gchar *encrypt(gchar *src);
+static gboolean is_single_selection(GtkTreeSelection *treesel);
+static gboolean is_folder_selected(GList *selected_items);
 
 #endif

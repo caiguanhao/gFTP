@@ -51,6 +51,7 @@ downloaded to that directory.
 Requirements
 ------------
  * libcurl4-openssl-dev 7.21+ (http://curl.haxx.se/download.html)
+ * libgtk2.0-dev
 
 
 Testing this plugin in Geany
@@ -59,6 +60,9 @@ It's convenient to test building plugins in Geany. Here's my experience:
 
  * Download & Install libcurl4-openssl-dev 7.21+ . e.g. for Debian users:
    http://packages.debian.org/squeeze/libcurl4-openssl-dev
+   - sudo add-apt-repository "deb http://ftp.cn.debian.org/debian squeeze main"
+   - sudo apt-get update
+   - sudo apt-get install libcurl4-openssl-dev
    
  * Open gFTP.c in Geany and click Build > Set Build Commands.
    In C commands (Build), type 
