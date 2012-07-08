@@ -202,5 +202,7 @@ static gchar **parse_proxy_string(gchar *name);
 static gchar *encrypt(gchar *src);
 static gboolean is_single_selection(GtkTreeSelection *treesel);
 static gboolean is_folder_selected(GList *selected_items);
+static gchar *return_download_local_dir(gchar *name);
+static gchar *local_or_tmp_directory();
 
 #endif

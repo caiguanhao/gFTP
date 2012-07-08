@@ -246,10 +246,11 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 			-1);
 			break;
 		case 1: //download
+		case 11: //download (multiple)
 			gtk_list_store_append(pending_store, &iter);
 			gtk_list_store_set(pending_store, &iter,
 			0, GTK_STOCK_GO_DOWN, 
-			1, "0%", 2, 0, 3, -1, 4, n1, 5, n2, 6, 1, 
+			1, "0%", 2, 0, 3, -1, 4, n1, 5, n2, 6, type, 
 			-1);
 			break;
 		case 2: //load dir
@@ -258,6 +259,8 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 		case 2222: //load dir after previous command (cache enabled)
 		case 2223: //load dir after previous command (cache enabled), auto-scroll enabled
 		case 600: //index files, always get dir listing, always write to cache
+		case 610: //download all files
+		case 620: //download all files and folders
 		case 3: //commands
 			if (type==3) {
 				icon = g_strdup(GTK_STOCK_EXECUTE);
@@ -269,6 +272,13 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 			gtk_list_store_set(pending_store, &iter,
 			0, icon, 
 			1, "loading", 2, 0, 3, 0, 4, n1, 5, n2==NULL?"":n2, 6, type, 
+			-1);
+			break;
+		case 210: //prompt open folder
+			gtk_list_store_append(pending_store, &iter);
+			gtk_list_store_set(pending_store, &iter,
+			0, GTK_STOCK_OPEN, 
+			1, "loading", 2, 0, 3, 0, 4, n1, 5, NULL, 6, type, 
 			-1);
 			break;
 		case 211: //select file
@@ -1301,8 +1311,11 @@ static void *download_file(gpointer p)
 	struct rate dlspeed;
 	dlspeed.prev_s = 0.0;
 	g_get_current_time(&dlspeed.prev_t);
+	gboolean continuous_download = FALSE;
 	GString *dlfrom = g_string_new((gchar *)g_list_nth_data(dl, 0));
 	GString *dlto = g_string_new((gchar *)g_list_nth_data(dl, 1));
+	if ((gint)g_list_nth_data(dl, 2)==1) continuous_download = TRUE;
+	gint gtype = continuous_download?11:1;
 	if (curl) {
 		FILE *fp;
 		fp=fopen(dlto->str,"wb");
@@ -1322,8 +1335,13 @@ static void *download_file(gpointer p)
 		curl_easy_perform(curl);
 		fclose(fp);
 	}
+	long resp_code;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp_code);
+	if (resp_code==550) { //if no permission and the download is denied, delete the empty file.
+		remove(dlto->str);
+	}
 	gdk_threads_enter();
-	if (!to_abort) {
+	if (!to_abort && !continuous_download) {
 		double val;
 		curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &val);
 		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Total download time: %0.3f s.", val));
@@ -1336,7 +1354,7 @@ static void *download_file(gpointer p)
 	}
 	gtk_widget_hide(geany->main_widgets->progressbar);
 	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
-	execute_end(1);
+	execute_end(gtype);
 	gdk_threads_leave();
 	g_thread_exit(NULL);
 	return NULL;
@@ -1559,10 +1577,22 @@ static void *get_dir_listing(gpointer p)
 	gboolean index_mode = FALSE;
 	gboolean command_mode = FALSE;
 	gboolean create_file_mode = FALSE;
+	gboolean download_files_mode = FALSE;
+	gboolean download_all_files_mode = FALSE;
 	gint i, gtype = 2;
+	glong file_method = CURLFTPMETHOD_NOCWD;
 	if ((gint)g_list_nth_data(ls, 3)==1) cache_enabled = TRUE;
 	if ((gint)g_list_nth_data(ls, 4)==1) index_mode = TRUE;
 	if ((gint)g_list_nth_data(ls, 5)==1) command_mode = TRUE;
+	switch((gint)g_list_nth_data(ls, 7)){
+		case 620:
+			download_all_files_mode = TRUE;
+		case 610:
+			download_files_mode = TRUE;
+			/* if NOCWD: download all files of a folder and download again
+			 * the list returns empty; so switch to single cwd mode */
+			file_method = CURLFTPMETHOD_SINGLECWD;
+	}
 	if (command_mode) {
 		g_usleep(2000000); //too fast to execute multiple commands
 		gtype = 3;
@@ -1672,7 +1702,7 @@ static void *get_dir_listing(gpointer p)
 			else
 				curl_easy_setopt(curl, CURLOPT_DEBUGDATA, "");
 			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-			curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_NOCWD);
+			curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, file_method);
 			if (current_settings.showhiddenfiles) {
 				if (IS_CURRENT_PROFILE_SFTP) 
 					curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "ls -a");
@@ -1718,26 +1748,45 @@ static void *get_dir_listing(gpointer p)
 			gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(toolbar.connect), GTK_STOCK_DISCONNECT);
 			if (auto_scroll) fileview_scroll_to_iter(&parent);
 			gdk_threads_leave();
-			if (index_mode) {
+			if (index_mode || download_files_mode) {
 				GtkTreeIter child;
 				if (gtk_tree_store_iter_is_valid(file_store, &parent) && gtk_tree_model_iter_children(GTK_TREE_MODEL(file_store), &child, &parent)) {
 					gchar *icon = NULL;
 					gchar *dir = NULL;
+					gchar *name = NULL;
 					gint cmp;
-					do {
-						gtk_tree_model_get(GTK_TREE_MODEL(file_store), &child, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &dir, -1);
-						cmp = g_strcmp0(icon, GTK_STOCK_DIRECTORY);
-						g_free(icon);
-						if (cmp!=0) {
-							break; // if it is not a dir
-						} else if (gtk_tree_model_iter_has_child(GTK_TREE_MODEL(file_store), &child)) {
-							break; // if it is already checked
-						} else {
-							add_pending_item(600, dir, dir);
-							//break; // allow one working dir in one level
-						}
-						g_free(dir);
-					} while (gtk_tree_model_iter_next(GTK_TREE_MODEL(file_store), &child));
+					if (index_mode) {
+						do {
+							gtk_tree_model_get(GTK_TREE_MODEL(file_store), &child, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &dir, -1);
+							cmp = g_strcmp0(icon, GTK_STOCK_DIRECTORY);
+							g_free(icon);
+							if (cmp!=0) {
+								break; // if it is not a dir
+							} else if (gtk_tree_model_iter_has_child(GTK_TREE_MODEL(file_store), &child)) {
+								break; // if it is already checked
+							} else {
+								add_pending_item(600, dir, dir);
+								//break; // allow one working dir in one level
+							}
+							g_free(dir);
+						} while (gtk_tree_model_iter_next(GTK_TREE_MODEL(file_store), &child));
+					}
+					if (download_files_mode) {
+						do {
+							gtk_tree_model_get(GTK_TREE_MODEL(file_store), &child, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &name, -1);
+							cmp = g_strcmp0(icon, GTK_STOCK_DIRECTORY);
+							g_free(icon);
+							if (cmp!=0) {
+								add_pending_item(11, name, return_download_local_dir(name));
+							} else if (gtk_tree_model_iter_has_child(GTK_TREE_MODEL(file_store), &child)) {
+								break; // if it is already checked
+							} else if (download_all_files_mode) {
+								return_download_local_dir(name); //create empty folders
+								add_pending_item(620, name, name);
+							}
+							g_free(name);
+						} while (gtk_tree_model_iter_next(GTK_TREE_MODEL(file_store), &child));
+					}
 				}
 			}
 		} else if (!index_mode && to_list_return==1 && listing->len>0) {
@@ -1854,10 +1903,12 @@ static void execute()
 					to_upload_file(ul);
 					break;
 				}
-				case 1: {
+				case 1: //one download
+				case 11: { //multiple downloads
 					GList *dl = NULL;
 					dl = g_list_append(dl, remote);
 					dl = g_list_append(dl, local);
+					dl = g_list_append(dl, GINT_TO_POINTER(type==11));
 					to_download_file(dl);
 					break;
 				}
@@ -1867,6 +1918,8 @@ static void execute()
 				case 2222:
 				case 2223:
 				case 600:
+				case 610:
+				case 620:
 				case 3: {
 					gchar *dn;
 					if (type==3 && g_strcmp0(local, "")==0) { //create file mode
@@ -1882,6 +1935,9 @@ static void execute()
 					if (type==600) {
 						ls = g_list_append(ls, GINT_TO_POINTER(0)); //no read-cache
 						ls = g_list_append(ls, GINT_TO_POINTER(1)); //index mode
+					}else if (type==610 || type==620) {
+						ls = g_list_append(ls, GINT_TO_POINTER(0)); //no read-cache
+						ls = g_list_append(ls, GINT_TO_POINTER(0)); //no index mode
 					}else{
 						if (type==222 || type==2222 || type==2223)
 							ls = g_list_append(ls, GINT_TO_POINTER(1));
@@ -1891,7 +1947,16 @@ static void execute()
 					}
 					ls = g_list_append(ls, GINT_TO_POINTER(type==3)); //to use commands
 					ls = g_list_append(ls, GINT_TO_POINTER(type==2223)); //to auto-scroll
+					ls = g_list_append(ls, GINT_TO_POINTER(type)); //download files mode
 					to_get_dir_listing(ls);
+					break;
+				}
+				case 210: {
+					if (gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pending_store), NULL)==1) //only execute the last 210;
+						if (dialogs_show_question("View downloaded file(s) in file browser?"))
+							dialogs_show_msgbox(0, "%s", remote);
+							//open_external(remote);
+					execute_end(210);
 					break;
 				}
 				case 211: {
@@ -1918,7 +1983,7 @@ static void execute_end(gint type)
 		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 6, &ptype, -1);
 		
 		if (type==ptype) delete = TRUE;
-		if (type==2 && (ptype==2222 || ptype==2223 || ptype==222 || ptype==22 || ptype==600)) delete = TRUE;
+		if (type==2 && (ptype==2222 || ptype==2223 || ptype==222 || ptype==22 || ptype==600 || ptype==610 || ptype==620)) delete = TRUE;
 		
 		if (delete) {
 			gtk_list_store_remove(GTK_LIST_STORE(pending_store), &current_pending);
@@ -1926,7 +1991,7 @@ static void execute_end(gint type)
 			if (to_abort) {
 				while (gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
 					gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 6, &ptype, -1);
-					if (ptype && (ptype==22 || ptype==2222 || ptype==2223 || ptype==600)) 
+					if (ptype) 
 						gtk_list_store_remove(GTK_LIST_STORE(pending_store), &current_pending);
 					else
 						break;
@@ -2126,11 +2191,11 @@ static GtkWidget *create_popup_menu(void)
 	
 	item = gtk_menu_item_new_with_mnemonic("_1. Download all files in this folder");
 	gtk_container_add(GTK_CONTAINER(submenu), item);
-	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)404);
+	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)610);
 	
 	item = gtk_menu_item_new_with_mnemonic("_2. Download all files and folders in this folder");
 	gtk_container_add(GTK_CONTAINER(submenu), item);
-	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)404);
+	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)620);
 	
 	item = gtk_separator_menu_item_new();
 	gtk_container_add(GTK_CONTAINER(submenu), item);
@@ -2221,6 +2286,16 @@ static gchar *encrypt(gchar *src)
 		g_free(p2);
 	}
 	return src;
+}
+
+static gchar *return_download_local_dir(gchar *name)
+{
+	gchar *filepath;
+	filepath = local_or_tmp_directory();
+	if (g_strcmp0(g_path_get_dirname(name), ".")!=0)
+		filepath = g_strconcat(filepath, "/", g_path_get_dirname(name), NULL);
+	g_mkdir_with_parents(filepath, 0777);
+	return g_strdup_printf("%s/%s", filepath, g_path_get_basename(name));
 }
 
 static gchar *local_or_tmp_directory()
@@ -3181,7 +3256,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 			case 404:
 				dialogs_show_msgbox(GTK_MESSAGE_INFO, "This is a future function.");
 				break;
-			case 600:
+			case 600: //index and search files
 				treepath = g_list_nth_data(list, 0);
 				gtk_tree_model_get_iter(model, &iter, treepath);
 				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
@@ -3191,6 +3266,31 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				if (g_strcmp0(name, ".")==0) name = "";
 				if (!is_folder_selected(list)) name = g_strconcat(name, "/", NULL);
 				index_and_search(name);
+				break;
+			case 610: //download all files in folder
+				for (i=0; i<g_list_length(list); i++) {
+					treepath = g_list_nth_data(list, i);
+					gtk_tree_model_get_iter(model, &iter, treepath);
+					gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+					if (!is_folder_selected(list)) {
+						name = g_path_get_dirname(name);
+					}
+					if (g_strcmp0(name, ".")==0) name = "";
+					add_pending_item(610, name, name);
+				}
+				break;
+			case 620: //download all files and folders in folder
+				for (i=0; i<g_list_length(list); i++) {
+					treepath = g_list_nth_data(list, i);
+					gtk_tree_model_get_iter(model, &iter, treepath);
+					gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+					if (!is_folder_selected(list)) {
+						name = g_path_get_dirname(name);
+					}
+					if (g_strcmp0(name, ".")==0) name = "";
+					return_download_local_dir(name); //create empty folders
+					add_pending_item(620, name, name);
+				}
 				break;
 			case 999: {
 				load_profiles(2);
@@ -3267,13 +3367,7 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
 				}
 			}
 		} else {
-			gchar *filepath;
-			filepath = local_or_tmp_directory();
-			if (g_strcmp0(g_path_get_dirname(name), ".")!=0)
-				filepath = g_strconcat(filepath, "/", g_path_get_dirname(name), NULL);
-			g_mkdir_with_parents(filepath, 0777);
-			filepath = g_strdup_printf("%s/%s", filepath, g_path_get_basename(name));
-			add_pending_item(1, name, filepath);
+			add_pending_item(1, name, return_download_local_dir(name));
 		}
 	}
 	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
