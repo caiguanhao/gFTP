@@ -236,6 +236,7 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 {
 	g_return_if_fail(to_abort==FALSE);
 	GtkTreeIter iter;
+	gchar *icon;
 	switch (type) {
 		case 0: //upload
 			gtk_list_store_append(pending_store, &iter);
@@ -255,10 +256,18 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 		case 22: //load dir after previous command (used to abort together)
 		case 222: //load dir (cache enabled)
 		case 2222: //load dir after previous command (cache enabled)
+		case 2223: //load dir after previous command (cache enabled), auto-scroll enabled
 		case 600: //index files, always get dir listing, always write to cache
+		case 3: //commands
+			if (type==3) {
+				icon = g_strdup(GTK_STOCK_EXECUTE);
+				if (g_strcmp0(n2, "")==0) icon = g_strdup(GTK_STOCK_NEW);
+			} else {
+				icon = g_strdup(GTK_STOCK_REFRESH);
+			}
 			gtk_list_store_append(pending_store, &iter);
 			gtk_list_store_set(pending_store, &iter,
-			0, GTK_STOCK_REFRESH, 
+			0, icon, 
 			1, "loading", 2, 0, 3, 0, 4, n1, 5, n2==NULL?"":n2, 6, type, 
 			-1);
 			break;
@@ -267,20 +276,6 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 			gtk_list_store_set(pending_store, &iter,
 			0, GTK_STOCK_JUMP_TO, 
 			1, "loading", 2, 0, 3, 0, 4, n1, 5, NULL, 6, type, 
-			-1);
-			break;
-		case 3: //commands
-			gtk_list_store_append(pending_store, &iter);
-			gtk_list_store_set(pending_store, &iter,
-			0, GTK_STOCK_EXECUTE, 
-			1, "loading", 2, 0, 3, 0, 4, n1, 5, n2, 6, 3, 
-			-1);
-			break;
-		case 55: //create new file
-			gtk_list_store_append(pending_store, &iter);
-			gtk_list_store_set(pending_store, &iter,
-			0, GTK_STOCK_NEW, 
-			1, "loading", 2, 0, 3, 0, 4, n1, 5, "", 6, 55, 
 			-1);
 			break;
 	}
@@ -510,18 +505,13 @@ static int normal_progress (void *p, double dltotal, double dlnow, double ultota
 
 static void open_external(const gchar *dir)
 {
-	gchar *cmd;
-	gchar *locale_cmd;
-	GError *error = NULL;
-	cmd = g_strdup_printf("nautilus \"%s\"", dir);
-	locale_cmd = utils_get_locale_from_utf8(cmd);
-	if (!g_spawn_command_line_async(locale_cmd, &error))
-	{
-		ui_set_statusbar(TRUE, "Could not execute '%s' (%s).", cmd, error->message);
+	GError* error = NULL;
+	gchar *argv[] = {"xdg-open", g_strdup_printf("%s", dir), NULL};
+
+	if (!g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error)) {
+		ui_set_statusbar(TRUE, "Could not open '%s' (%s).", dir, error->message);
 		g_error_free(error);
 	}
-	g_free(locale_cmd);
-	g_free(cmd);
 }
 
 static size_t write_function(void *ptr, size_t size, size_t nmemb, void *p)
@@ -1399,37 +1389,6 @@ static void *upload_file(gpointer p)
 	return NULL;
 }
 
-static void *create_file(gpointer p)
-{
-	gchar *ulto = (gchar *)p;
-	if (curl) {
-		ulto = g_strconcat(current_profile.url, ulto, NULL);
-		curl_easy_setopt(curl, CURLOPT_URL, find_host(ulto));
-		proxy_config();
-		auth_config();
-		curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
-		curl_easy_setopt(curl, CURLOPT_FTP_CREATE_MISSING_DIRS, 1L);
-		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
-		/* use create_file to create folders recursively (instead of MKD or mkdir) 
-		 * may cause these pointless errors:
-		 * > Creating the dir/file failed: Operation failed
-		 * > Error in the SSH layer
-		 * so we use regex to hide these errors. */
-		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, "dir/file|ssh\\slayer");
-		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-		curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_SINGLECWD);
-		curl_easy_perform(curl);
-	}
-	gdk_threads_enter();
-	gtk_widget_hide(geany->main_widgets->progressbar);
-	gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), 0.0);
-	g_free(ulto);
-	execute_end(55);
-	gdk_threads_leave();
-	g_thread_exit(NULL);
-	return NULL;
-}
-
 static void *get_server_time(gpointer p)
 {
 	gchar *dn = g_strdup_printf("%s/", g_path_get_dirname(current_profile.remote));
@@ -1598,13 +1557,48 @@ static void *get_dir_listing(gpointer p)
 	gboolean auto_scroll = FALSE;
 	gboolean download_listing = TRUE;
 	gboolean index_mode = FALSE;
+	gboolean command_mode = FALSE;
+	gboolean create_file_mode = FALSE;
+	gint i, gtype = 2;
 	if ((gint)g_list_nth_data(ls, 3)==1) cache_enabled = TRUE;
 	if ((gint)g_list_nth_data(ls, 4)==1) index_mode = TRUE;
+	if ((gint)g_list_nth_data(ls, 5)==1) command_mode = TRUE;
+	if (command_mode) {
+		g_usleep(2000000); //too fast to execute multiple commands
+		gtype = 3;
+		if (g_strcmp0(lsto->str, "")!=0) { //commands mode
+			gchar **commands = g_strsplit(lsto->str, "\n", 0);
+			struct curl_slist *headers = NULL;
+			for (i=0; i<g_strv_length(commands); i++)
+				headers = curl_slist_append(headers, commands[i]);
+			curl_easy_setopt(curl, CURLOPT_QUOTE, headers);
+			g_strfreev(commands);
+			g_string_assign(lsto, (gchar *)g_list_nth_data(ls, 0));
+		} else { //create file mode
+			create_file_mode = TRUE;
+			curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
+			curl_easy_setopt(curl, CURLOPT_FTP_CREATE_MISSING_DIRS, 1L);
+			if (g_regex_match_simple("\n", lsfrom->str, 0, 0)) {
+				gchar **seps = g_strsplit(lsfrom->str, "\n", 0);
+				g_string_assign(lsto, seps[0]);
+				g_string_assign(lsfrom, g_strjoinv(NULL, seps));
+				g_string_assign(url, g_strjoinv(NULL, g_strsplit(url->str, "\n", 0)));
+				g_strfreev(seps);
+			} else {
+				g_string_assign(lsto, lsfrom->str);
+				if (g_str_has_suffix(lsfrom->str, "/")) {
+					g_string_assign(lsto, g_path_get_dirname(lsto->str));
+				}
+				g_string_assign(lsto, g_path_get_dirname(lsto->str));
+			}
+		}
+	}
 	if (g_strcmp0(lsto->str, "")!=0) {
 		if (!redefine_parent_iter(lsto->str, TRUE)) {
-			goto end;
+			if (!create_file_mode) goto end;
 		} else
-			auto_scroll = TRUE;
+			if ((gint)g_list_nth_data(ls, 6)==1)
+				auto_scroll = TRUE;
 	}
 	GString *str;
 	str = g_string_new("");
@@ -1668,9 +1662,17 @@ static void *get_dir_listing(gpointer p)
 			curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
 			curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 			curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
-			curl_easy_setopt(curl, CURLOPT_DEBUGDATA, "^226");
+			if (create_file_mode)
+				/* use create_file to create folders recursively (instead of MKD or mkdir) 
+				 * may cause these pointless errors:
+				 * > Creating the dir/file failed: Operation failed
+				 * > Error in the SSH layer
+				 * so we use regex to hide these errors. */
+				curl_easy_setopt(curl, CURLOPT_DEBUGDATA, "dir/file|ssh\\slayer");
+			else
+				curl_easy_setopt(curl, CURLOPT_DEBUGDATA, "");
 			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-			curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_SINGLECWD);
+			curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_NOCWD);
 			if (current_settings.showhiddenfiles) {
 				if (IS_CURRENT_PROFILE_SFTP) 
 					curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "ls -a");
@@ -1678,6 +1680,7 @@ static void *get_dir_listing(gpointer p)
 					curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "LIST -a");
 			}
 			code = curl_easy_perform(curl);
+			if (create_file_mode && code==79) code=0; //hide pointless error
 			if (code!=0) {
 				gdk_threads_enter();
 				log_new_str(COLOR_RED, g_strdup_printf("ERROR %d: %s (%s)", code, curl_easy_strerror(code), url->str));
@@ -1760,45 +1763,9 @@ static void *get_dir_listing(gpointer p)
 	// don't g_free(listing) / g_free(ofilename) / g_key_file_free(cachekeyfile)
 	// as it will cause crash after try_another_username_password();
 	ui_progress_bar_stop();
-	execute_end(2);
+	execute_end(gtype);
 	gdk_threads_leave();
 	g_mutex_unlock(mutex);
-	g_thread_exit(NULL);
-	return NULL;
-}
-
-static void *send_command(gpointer p)
-{
-	gchar *comm = (gchar *)p;
-	gchar **comms = g_strsplit(comm, "\n", 0);
-	gint i;
-	const gchar *url = g_strconcat(current_profile.url, comms[0], NULL);
-	struct curl_slist *headers = NULL;
-	if (curl) {
-		curl_easy_setopt(curl, CURLOPT_URL, find_host((gchar *)url));
-		proxy_config();
-		auth_config();
-		GString *str = g_string_new("");
-		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_function);
-		curl_easy_setopt(curl, CURLOPT_WRITEDATA, str);
-		curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, normal_progress);
-		curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, NULL);
-		curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
-		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
-		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-		curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_SINGLECWD);
-		for (i=1; i<g_strv_length(comms); i++)
-			headers = curl_slist_append(headers, comms[i]);
-		curl_easy_setopt(curl, CURLOPT_POSTQUOTE, headers);
-		curl_easy_perform(curl);
-	}
-	gdk_threads_enter();
-	ui_progress_bar_stop();
-	execute_end(3);
-	gdk_threads_leave();
-	g_strfreev(comms);
-	g_free(comm);
 	g_thread_exit(NULL);
 	return NULL;
 }
@@ -1868,22 +1835,6 @@ static void *to_get_dir_listing(GList *p)
 	return NULL;
 }
 
-static void *to_send_commands(gpointer p)
-{
-	curl_easy_reset(curl);
-	ui_progress_bar_start("Please wait...");
-	g_thread_create(&send_command, (gpointer)p, FALSE, NULL);
-	return NULL;
-}
-
-static void *to_create_file(gpointer p)
-{
-	curl_easy_reset(curl);
-	ui_progress_bar_start("Please wait...");
-	g_thread_create(&create_file, (gpointer)p, FALSE, NULL);
-	return NULL;
-}
-
 static void execute()
 {
 	if (running==FALSE) {
@@ -1914,9 +1865,16 @@ static void execute()
 				case 22:
 				case 222:
 				case 2222:
-				case 600: {
-					gchar *dn = g_strdup_printf("%s/", g_path_get_dirname(remote));
-					if (g_strcmp0(dn, "./")==0)	dn = g_strdup("");
+				case 2223:
+				case 600:
+				case 3: {
+					gchar *dn;
+					if (type==3 && g_strcmp0(local, "")==0) { //create file mode
+						dn = g_strdup_printf("%s", remote);
+					} else {
+						dn = g_strdup_printf("%s/", g_path_get_dirname(remote));
+						if (g_strcmp0(dn, "./")==0)	dn = g_strdup("");
+					}
 					GList *ls = NULL;
 					ls = g_list_append(ls, g_strdup_printf("%s", dn));
 					ls = g_list_append(ls, local);
@@ -1925,30 +1883,20 @@ static void execute()
 						ls = g_list_append(ls, GINT_TO_POINTER(0)); //no read-cache
 						ls = g_list_append(ls, GINT_TO_POINTER(1)); //index mode
 					}else{
-						if (type==222 || type==2222)
+						if (type==222 || type==2222 || type==2223)
 							ls = g_list_append(ls, GINT_TO_POINTER(1));
 						else
 							ls = g_list_append(ls, GINT_TO_POINTER(0));
 						ls = g_list_append(ls, GINT_TO_POINTER(0));
 					}
+					ls = g_list_append(ls, GINT_TO_POINTER(type==3)); //to use commands
+					ls = g_list_append(ls, GINT_TO_POINTER(type==2223)); //to auto-scroll
 					to_get_dir_listing(ls);
 					break;
 				}
 				case 211: {
 					locate_file_in_fileview(remote);
 					execute_end(211);
-					break;
-				}
-				case 3: {
-					gchar *comm;
-					comm = g_strconcat(remote, "\n", local, NULL);
-					to_send_commands(comm);
-					break;
-				}
-				case 55: {
-					gchar *cf;
-					cf = g_strconcat(remote, NULL);
-					to_create_file(cf);
 					break;
 				}
 				default: {
@@ -1959,8 +1907,6 @@ static void execute()
 			gint i=0,y=0; //Used to stop an unknown error.
 			for(i=0; i<100000; i++){y+=1;}
 		}
-		//g_free(remote);
-		//g_free(local);
 	}
 }
 
@@ -1972,7 +1918,7 @@ static void execute_end(gint type)
 		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 6, &ptype, -1);
 		
 		if (type==ptype) delete = TRUE;
-		if (type==2 && (ptype==2222 || ptype==222 || ptype==22 || ptype==600)) delete = TRUE;
+		if (type==2 && (ptype==2222 || ptype==2223 || ptype==222 || ptype==22 || ptype==600)) delete = TRUE;
 		
 		if (delete) {
 			gtk_list_store_remove(GTK_LIST_STORE(pending_store), &current_pending);
@@ -1980,7 +1926,7 @@ static void execute_end(gint type)
 			if (to_abort) {
 				while (gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
 					gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 6, &ptype, -1);
-					if (ptype && (ptype==22 || ptype==2222 || ptype==600)) 
+					if (ptype && (ptype==22 || ptype==2222 || ptype==2223 || ptype==600)) 
 						gtk_list_store_remove(GTK_LIST_STORE(pending_store), &current_pending);
 					else
 						break;
@@ -2159,6 +2105,7 @@ static GtkWidget *create_popup_menu(void)
 	gtk_menu_item_set_label(GTK_MENU_ITEM(item), "_Rename");
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)5);
+	popup.rename = item;
 	
 	item = gtk_separator_menu_item_new();
 	gtk_container_add(GTK_CONTAINER(menu), item);
@@ -2711,6 +2658,15 @@ static void load_settings(gint type)
 	tmp_dir = g_strdup_printf("%s/gFTP/",(gchar *)g_get_tmp_dir());
 }
 
+static gboolean is_selected(GtkTreeSelection *treesel)
+{
+	if (gtk_tree_selection_count_selected_rows(treesel) >= 1)
+		return TRUE;
+
+	ui_set_statusbar(FALSE, "Please select at least one item!");
+	return FALSE;
+}
+
 static gboolean is_single_selection(GtkTreeSelection *treesel)
 {
 	if (gtk_tree_selection_count_selected_rows(treesel) == 1)
@@ -2959,106 +2915,214 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 	GList *list;
 	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
 	list = gtk_tree_selection_get_selected_rows(treesel, &model);
-	
-	if (is_single_selection(treesel)) {
-		GtkTreePath *treepath = list->data;
-		GtkTreeIter iter;
-		gtk_tree_model_get_iter(model, &iter, treepath);
-		gchar *name;
+	GtkTreeIter iter;
+	gchar *name = NULL;
+	gchar *icon = NULL;
+	GtkTreePath *treepath;
+	gint i, j;
+	gint selected_items;
+	if (is_selected(treesel)) {
 		switch (type) {
 			case 2:
-				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
-					if (is_folder_selected(list)) {
-						gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
-						gchar *dirname = NULL;
-						if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
-							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
-							if (dirname) {
-								if (!current_settings.confirm_delete || dialogs_show_question("Are you sure you want to delete /%s%s ?", name, dirname)) {
-									if (IS_CURRENT_PROFILE_SFTP)
-										add_pending_item(3, name, g_strdup_printf("rmdir \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname)));
-									else
-										add_pending_item(3, name, g_strdup_printf("RMD %s", dirname));
-									if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+				selected_items = 0;
+				for (i=0; i<g_list_length(list); i++) {
+					treepath = g_list_nth_data(list, i);
+					gtk_tree_model_get_iter(model, &iter, treepath);
+					gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, -1);
+					if (utils_str_equal(icon, GTK_STOCK_DIRECTORY))	{
+						selected_items += 1;
+					}
+				}
+				if (selected_items == 0) break;
+				if (selected_items==1 || !current_settings.confirm_delete || dialogs_show_question("Are you sure you want to delete these %d empty folders?", selected_items)) {
+					gchar *name_t = NULL;
+					gchar *dirname_t = NULL;
+					gchar *dirname = NULL;
+					for (i=0; i<g_list_length(list); i++) {
+						treepath = g_list_nth_data(list, i);
+						gtk_tree_model_get_iter(model, &iter, treepath);
+						if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
+							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, -1);
+							if (utils_str_equal(icon, GTK_STOCK_DIRECTORY))	{
+								gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
+								if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
+									gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
+									if (dirname) {
+										if (name_t!=NULL && g_strcmp0(name_t, name)==0) {
+											if (IS_CURRENT_PROFILE_SFTP)
+												dirname_t = g_strdup_printf("rmdir \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname));
+											else
+												dirname_t = g_strdup_printf("%s\nRMD %s%s", dirname_t, name, dirname);
+										} else {
+											if (name_t!=NULL) {
+												add_pending_item(3, name_t, dirname_t);
+											}
+											name_t = g_strdup(name);
+											if (IS_CURRENT_PROFILE_SFTP)
+												dirname_t = g_strdup_printf("rmdir \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname));
+											else
+												dirname_t = g_strdup_printf("RMD %s%s", name, dirname);
+										}
+									}
 								}
-								g_free(dirname);
 							}
 						}
+					}
+					if (name_t!=NULL && dirname!=NULL && dirname_t!=NULL) {
+						if (selected_items!=1 || !current_settings.confirm_delete || dialogs_show_question("Are you sure you want to delete '/%s%s'?", name, dirname)) {
+							add_pending_item(3, name_t, dirname_t);
+						}
+						g_free(name_t);
+						g_free(dirname_t);
 					}
 				}
 				break;
 			case 1: // the same function to create folders and files.
 			case 3:
-				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+			{
 				gchar *defaultfn = "New File";
-				if (!is_folder_selected(list)) {
-					defaultfn = g_strdup_printf("New %s", g_path_get_basename(name));
-					name = g_strdup_printf("%s/", g_path_get_dirname(name));
+				if (g_list_length(list)==1) {
+					treepath = list->data;
+					gtk_tree_model_get_iter(model, &iter, treepath);
+					gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &name, -1);
+					if (!utils_str_equal(icon, GTK_STOCK_DIRECTORY)) {
+						defaultfn = g_strdup_printf("New %s", g_path_get_basename(name));
+						name = g_strdup_printf("%s/", g_path_get_dirname(name));
+					}
 				}
 				if (g_strcmp0(name, "./")==0) name = "";
+				if (name==NULL) name = g_strdup("(multiple selections)"); else name = g_strdup_printf("/%s", name);
 				gchar *filename = NULL;
 				if (type==1)
-					filename = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Location: /%s\nPlease input folder name:\n- Recursively create missing folders, eg. new/multi/level/folder)", name), "New Folder");
-				if (type==3)
-					filename = dialogs_show_input("Create Blank File", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Location: /%s\nPlease input file name:\n- Recursively create missing folders, eg. multi/level/folder.htm)\n- Existing file will be cleared. Make sure you are creating a new file.", name), defaultfn);
+					filename = dialogs_show_input("New Folder", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Location: %s\nPlease input folder name:\n- Recursively create missing folders, eg. new/multi/level/folder)", name), "New Folder");
+				if (type==3) {
+					enterfilename:
+					filename = dialogs_show_input("Create Blank File", GTK_WINDOW(geany->main_widgets->window), g_strdup_printf("Location: %s\nPlease input file name:\n- Recursively create missing folders, eg. multi/level/folder.htm)\n- Existing file will be cleared. Make sure you are creating a new file.", name), defaultfn);
+					if (g_str_has_suffix(filename, "/")) {
+						dialogs_show_msgbox(GTK_MESSAGE_WARNING, "File name must not end with a slash '/'.");
+						defaultfn = g_strdup(filename);
+						goto enterfilename;
+					}
+				}
 				gchar *filepath;
 				if (filename && g_utf8_strlen(filename, -1)>0) {
-					/* check file name in current level of file view
-					 * same file name will overwrite, same folder name won't change anything */
-					if (!is_file_exists(iter, is_folder_selected(list), filename) || type==1 || dialogs_show_question("'%s' already exists. Continue?\n- If the existing one is a file, it will be overwritten.\n- If the existing one is a folder, an error will be returned.", filename)) {
-						if (type==1) // to create folder, add a '/' suffix
-							filename = g_strconcat(filename, "/", NULL);
-						if (!IS_CURRENT_PROFILE_SFTP) { // in non-SFTP mode, curl only creates 1-lvl missing dir.
-							gchar **parts = g_strsplit(filename, "/", 0);
-							if (g_strv_length(parts)>2) {
-								gchar *ap = "";
-								gint i;
-								/* Don't put all MKD commands in one request:
-								 * e.g. add_pending_item(3, name, "MKD a\nMKD a/b\nMKD a/b/c")
-								 * as it would not continue if any parent folder (a. a/b) exists. */
-								for (i=0; i<g_strv_length(parts)-1; i++) {
-									if (g_utf8_strlen(parts[i], -1)>0) {
-										if (i>0) ap = g_strconcat(ap, "/", NULL);
-										ap = g_strconcat(ap, parts[i], NULL);
-										add_pending_item(3, name, g_strdup_printf("MKD %s", ap));
+					if (type==3) {
+						for (j=0; j<g_list_length(list); j++) {
+							treepath = g_list_nth_data(list, j);
+							gtk_tree_model_get_iter(model, &iter, treepath);
+							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, -1);
+							if (is_file_exists(iter, utils_str_equal(icon, GTK_STOCK_DIRECTORY), filename) && !dialogs_show_question("'%s' already exists. Continue?\n- If the existing one is a file, it will be overwritten.\n- If the existing one is a folder, an error will be returned.", filename)) {
+								goto type3end;
+							} else {
+								break;
+							}
+						}
+					}
+					gchar *last_used_name = NULL;
+					for (j=0; j<g_list_length(list); j++) {
+						treepath = g_list_nth_data(list, j);
+						gtk_tree_model_get_iter(model, &iter, treepath);
+						if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
+							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &name, -1);
+							if (last_used_name!=NULL && g_strcmp0(last_used_name, g_path_get_dirname(name))==0)
+								continue;
+							else
+								last_used_name = g_path_get_dirname(name);
+							gboolean isDIR = utils_str_equal(icon, GTK_STOCK_DIRECTORY);
+							if (!isDIR) name = g_strdup_printf("%s/", g_path_get_dirname(name));
+							/* check file name in current level of file view
+							 * same file name will overwrite, same folder name won't change anything */
+							if (type==1) // to create folder, add a '/' suffix
+								if (!g_str_has_suffix(filename, "/"))
+									filename = g_strconcat(filename, "/", NULL);
+							if (!IS_CURRENT_PROFILE_SFTP) { // in non-SFTP mode, curl only creates 1-lvl missing dir.
+								gchar **parts = g_strsplit(filename, "/", 0);
+								if (g_strv_length(parts)>2) {
+									gchar *ap = "";
+									/* Don't put all MKD commands in one request:
+									 * e.g. add_pending_item(3, name, "MKD a\nMKD a/b\nMKD a/b/c")
+									 * as it would not continue if any parent folder (a. a/b) exists. */
+									for (i=0; i<g_strv_length(parts)-1; i++) {
+										if (g_utf8_strlen(parts[i], -1)>0) {
+											if (i>0) ap = g_strconcat(ap, "/", NULL);
+											ap = g_strconcat(ap, parts[i], NULL);
+											add_pending_item(3, name, g_strdup_printf("MKD %s%s", name, ap));
+										}
+									}
+								} else {
+									if (type==1) add_pending_item(3, name, g_strdup_printf("MKD %s%s", name, parts[0]));
+								}
+								g_strfreev(parts);
+							}
+							if (type==3 || IS_CURRENT_PROFILE_SFTP) {
+								filepath = g_strdup_printf("%s\n%s", name, filename);
+								add_pending_item(3, filepath, "");
+								if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) {
+									add_pending_item(22, name, name); //also SFTP create folders
+								}
+							}
+						}
+					}
+				}
+				type3end:
+				break;
+			}
+			case 4:
+				selected_items = 0;
+				for (i=0; i<g_list_length(list); i++) {
+					treepath = g_list_nth_data(list, i);
+					gtk_tree_model_get_iter(model, &iter, treepath);
+					gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, -1);
+					if (!utils_str_equal(icon, GTK_STOCK_DIRECTORY)) {
+						selected_items += 1;
+					}
+				}
+				if (selected_items == 0) break;
+				if (selected_items==1 || !current_settings.confirm_delete || dialogs_show_question("Are you sure you want to delete these %d files?", selected_items)) {
+					gchar *name_t = NULL;
+					gchar *dirname_t = NULL;
+					gchar *dirname = NULL;
+					for (i=0; i<g_list_length(list); i++) {
+						treepath = g_list_nth_data(list, i);
+						gtk_tree_model_get_iter(model, &iter, treepath);
+						if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
+							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, -1);
+							if (!utils_str_equal(icon, GTK_STOCK_DIRECTORY)) {
+								gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
+								if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
+									gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
+									if (dirname) {
+										if (name_t!=NULL && g_strcmp0(name_t, name)==0) {
+											if (IS_CURRENT_PROFILE_SFTP)
+												dirname_t = g_strdup_printf("%s\nrm \"/%s%s\"", dirname_t, quote_add_slash(name), quote_add_slash(dirname));
+											else
+												dirname_t = g_strdup_printf("%s\nDELE %s%s", dirname_t, name, dirname);
+										} else {
+											if (name_t!=NULL) {
+												add_pending_item(3, name_t, dirname_t);
+											}
+											name_t = g_strdup(name);
+											if (IS_CURRENT_PROFILE_SFTP)
+												dirname_t = g_strdup_printf("rm \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname));
+											else
+												dirname_t = g_strdup_printf("DELE %s%s", name, dirname);
+										}
 									}
 								}
-							} else {
-								if (type==1) add_pending_item(3, name, g_strdup_printf("MKD %s", parts[0]));
 							}
-							g_strfreev(parts);
 						}
-						filepath = g_strdup_printf("%s%s", name, filename);
-						add_pending_item(55, filepath, "");
-						if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
-						g_free(filepath);
 					}
-					g_free(filename);
-				}
-				break;
-			case 4:
-				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
-					if (!is_folder_selected(list)) {
-						gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
-						gchar *dirname = NULL;
-						if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
-							gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_NAME, &dirname, -1);
-							if (dirname) {
-								if (!current_settings.confirm_delete || dialogs_show_question("Are you sure you want to delete /%s%s ?", name, dirname)) {
-									if (IS_CURRENT_PROFILE_SFTP)
-										add_pending_item(3, name, g_strdup_printf("rm \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname)));
-									else
-										add_pending_item(3, name, g_strdup_printf("DELE %s", dirname));
-									if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
-								}
-								g_free(dirname);
-							}
+					if (name_t!=NULL && dirname!=NULL && dirname_t!=NULL) {
+						if (selected_items!=1 || !current_settings.confirm_delete || dialogs_show_question("Are you sure you want to delete '%s'?", dirname)) {
+							add_pending_item(3, name_t, dirname_t);
 						}
+						g_free(name_t);
+						g_free(dirname_t);
 					}
 				}
 				break;
 			case 5:
-				if (gtk_tree_model_iter_parent(model, &parent, &iter)) {
+				if (is_single_selection(treesel) && gtk_tree_model_get_iter(model, &iter, list->data) && gtk_tree_model_iter_parent(model, &parent, &iter)) {
 					gtk_tree_model_get(model, &parent, FILEVIEW_COLUMN_DIR, &name, -1);
 					gchar *dirname = NULL;
 					if (gtk_tree_store_iter_is_valid(file_store, &iter)) {
@@ -3097,35 +3161,29 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				}
 				break;
 			case 88: // refresh
-				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
-				if (!is_folder_selected(list)) {
-					name = g_path_get_dirname(name);
+				for (i=0; i<g_list_length(list); i++) {
+					treepath = g_list_nth_data(list, i);
+					gtk_tree_model_get_iter(model, &iter, treepath);
+					gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+					if (!is_folder_selected(list)) {
+						name = g_path_get_dirname(name);
+					}
+					if (g_strcmp0(name, ".")==0) name = "";
+					add_pending_item(2, name, name);
 				}
-				if (g_strcmp0(name, ".")==0) name = "";
-				if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
 				break;
 			case 99:
 				current_settings.showhiddenfiles = gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(menuitem));
-				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
-				if (!is_folder_selected(list)) {
-					name = g_path_get_dirname(name);
-				}
-				if (g_strcmp0(name, ".")==0) name = "";
-				if (redefine_parent_iter(name, FALSE)) add_pending_item(2, name, NULL);
 				break;
 			case 100:
 				current_settings.cache = gtk_check_menu_item_get_active(GTK_CHECK_MENU_ITEM(menuitem));
-				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
-				if (!is_folder_selected(list)) {
-					name = g_path_get_dirname(name);
-				}
-				if (g_strcmp0(name, ".")==0) name = "";
-				if (redefine_parent_iter(name, FALSE)) add_pending_item(current_settings.cache?222:2, name, NULL);
 				break;
 			case 404:
 				dialogs_show_msgbox(GTK_MESSAGE_INFO, "This is a future function.");
 				break;
 			case 600:
+				treepath = g_list_nth_data(list, 0);
+				gtk_tree_model_get_iter(model, &iter, treepath);
 				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
 				if (!is_folder_selected(list)) {
 					name = g_path_get_dirname(name);
@@ -3136,6 +3194,8 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				break;
 			case 999: {
 				load_profiles(2);
+				treepath = g_list_nth_data(list, 0);
+				gtk_tree_model_get_iter(model, &iter, treepath);
 				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
 				gchar *url;
 				url = return_web_url(name, is_folder_selected(list));
@@ -3184,7 +3244,7 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
 					if (g_strcmp0(remoteparts[i], "")!=0) {
 						remote = g_strconcat(remote, remoteparts[i], "/", NULL);
 						if (current_settings.autonav) {
-							add_pending_item(2222, remote, remote);
+							add_pending_item(2223, remote, remote);
 						} else {
 							gtk_tree_store_append(file_store, &iter2, &iter);
 							gtk_tree_store_set(file_store, &iter2,
@@ -3287,19 +3347,35 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
 	if (is_single_selection(treesel)) {
 		if (event->button == 1 && event->type == GDK_2BUTTON_PRESS) {
 			on_open_clicked(NULL, NULL);
-			return TRUE;
-		} else if (event->button == 3) {
-			static GtkWidget *popup_menu = NULL;
-			if (popup_menu==NULL) popup_menu = create_popup_menu();
-			gtk_menu_popup(GTK_MENU(popup_menu), NULL, NULL, NULL, NULL, event->button, event->time);
+			goto true;
 		}
 	}
+	if (event->button == 3) {
+		static GtkWidget *popup_menu = NULL;
+		if (popup_menu==NULL) popup_menu = create_popup_menu();
+		gtk_menu_popup(GTK_MENU(popup_menu), NULL, NULL, NULL, NULL, event->button, event->time);
+		
+		gtk_widget_set_sensitive(popup.rename, g_list_length(list)==1);
+		
+		if (!is_single_selection(treesel)) {
+			GtkTreePath *path;
+			if (gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(file_view), event->x, event->y, &path, NULL, NULL, NULL)) 
+				if (!gtk_tree_selection_path_is_selected(treesel, path))
+					goto false; //multiple items selected; right click the item which is not selected
+			goto true;
+		}
+	}
+	false:
 	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
 	g_list_free(list);
 	return FALSE;
+	true:
+	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
+	g_list_free(list);
+	return TRUE;
 }
 
-static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
+static gboolean on_key_release(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
 {
 	switch (event->keyval) {
 		case 0xff0d:
@@ -3341,6 +3417,17 @@ static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer use
 				static GtkWidget *popup_menu = NULL;
 				if (popup_menu==NULL) popup_menu = create_popup_menu();
 				gtk_menu_popup(GTK_MENU(popup_menu), NULL, NULL, (GtkMenuPositionFunc)right_click_menu_position_func, NULL, 0, GDK_CURRENT_TIME);
+				
+				GtkTreeSelection *treesel;
+				GtkTreeModel *model = GTK_TREE_MODEL(file_store);
+				GList *list;
+				treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
+				list = gtk_tree_selection_get_selected_rows(treesel, &model);
+				
+				gtk_widget_set_sensitive(popup.rename, g_list_length(list)==1);
+				
+				g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
+				g_list_free(list);
 			}
 			break;
 	}
@@ -4170,8 +4257,10 @@ static void prepare_file_view()
 	
 	gtk_tree_view_set_tooltip_column(GTK_TREE_VIEW(file_view), FILEVIEW_COLUMN_INFO);
 	
+	gtk_tree_selection_set_mode(gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view)), GTK_SELECTION_MULTIPLE);
+	
 	g_signal_connect(file_view, "button-press-event", G_CALLBACK(on_button_press), NULL);
-	g_signal_connect(file_view, "key-press-event", G_CALLBACK(on_key_press), NULL);
+	g_signal_connect(file_view, "key-release-event", G_CALLBACK(on_key_release), NULL);
 	
 	const GtkTargetEntry drag_dest_types[] = {
 		{ "STRING",			0, 0 },

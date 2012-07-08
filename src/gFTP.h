@@ -117,6 +117,7 @@ static struct
 
 static struct
 {
+	GtkWidget *rename;
 	GtkWidget *shf;
 	gulong shf_handler_id;
 	GtkWidget *cdl;
