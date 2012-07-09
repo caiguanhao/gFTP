@@ -261,6 +261,8 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 		case 600: //index files, always get dir listing, always write to cache
 		case 610: //download all files
 		case 620: //download all files and folders
+		case 630: //delete all files
+		case 640: //delete all files and folders
 		case 3: //commands
 			if (type==3) {
 				icon = g_strdup(GTK_STOCK_EXECUTE);
@@ -288,6 +290,13 @@ static void add_pending_item(gint type, gchar *n1, gchar *n2)
 			1, "loading", 2, 0, 3, 0, 4, n1, 5, NULL, 6, type, 
 			-1);
 			break;
+		case 701: //set value
+			gtk_list_store_append(pending_store, &iter);
+			gtk_list_store_set(pending_store, &iter,
+			0, GTK_STOCK_EXECUTE, 
+			1, "loading", 2, 0, 3, 0, 4, n1, 5, NULL, 6, type, 
+			-1);
+			break;
 	}
 	execute();
 }
@@ -312,7 +321,7 @@ static int add_item(gpointer data, gboolean is_dir)
 	gchar **parts=g_regex_split_simple("\n", data, 0, 0);
 	gboolean valid = gtk_tree_store_iter_is_valid(file_store, &parent);
 	if (strcmp(parts[0],".")==0||strcmp(parts[0],"..")==0) return 1;
-	if (!current_settings.showhiddenfiles && g_str_has_prefix(parts[0], ".")) 
+	if (!current_settings.showhiddenfiles && always_show_hidden_files==0 && g_str_has_prefix(parts[0], ".")) 
 		return 1; // some SFTP/FTP server always shows the hidden files.
 	GtkTreeIter iter;
 	gtk_tree_store_append(file_store, &iter, valid?&parent:NULL);
@@ -1571,6 +1580,8 @@ static void *get_dir_listing(gpointer p)
 	GString *lsfrom = g_string_new((gchar *)g_list_nth_data(ls, 0));
 	GString *lsto = g_string_new((gchar *)g_list_nth_data(ls, 1));
 	GString *url = g_string_new((gchar *)g_list_nth_data(ls, 2));
+	GString *root_dir = g_string_new((gchar *)g_list_nth_data(ls, 1));
+	//root_dir is used when deleting files and folders in SFTP
 	gboolean cache_enabled = FALSE;
 	gboolean auto_scroll = FALSE;
 	gboolean download_listing = TRUE;
@@ -1579,6 +1590,8 @@ static void *get_dir_listing(gpointer p)
 	gboolean create_file_mode = FALSE;
 	gboolean download_files_mode = FALSE;
 	gboolean download_all_files_mode = FALSE;
+	gboolean delete_files_mode = FALSE;
+	gboolean delete_all_files_mode = FALSE;
 	gint i, gtype = 2;
 	glong file_method = CURLFTPMETHOD_NOCWD;
 	if ((gint)g_list_nth_data(ls, 3)==1) cache_enabled = TRUE;
@@ -1592,9 +1605,15 @@ static void *get_dir_listing(gpointer p)
 			/* if NOCWD: download all files of a folder and download again
 			 * the list returns empty; so switch to single cwd mode */
 			file_method = CURLFTPMETHOD_SINGLECWD;
+			break;
+		case 640:
+			delete_all_files_mode = TRUE;
+			g_string_assign(lsto, (gchar *)g_list_nth_data(ls, 0));
+		case 630:
+			delete_files_mode = TRUE;
 	}
 	if (command_mode) {
-		g_usleep(2000000); //too fast to execute multiple commands
+		g_usleep(200000); //too fast to execute multiple commands
 		gtype = 3;
 		if (g_strcmp0(lsto->str, "")!=0) { //commands mode
 			gchar **commands = g_strsplit(lsto->str, "\n", 0);
@@ -1703,7 +1722,7 @@ static void *get_dir_listing(gpointer p)
 				curl_easy_setopt(curl, CURLOPT_DEBUGDATA, "");
 			curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
 			curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, file_method);
-			if (current_settings.showhiddenfiles) {
+			if (current_settings.showhiddenfiles || always_show_hidden_files>0) {
 				if (IS_CURRENT_PROFILE_SFTP) 
 					curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "ls -a");
 				else
@@ -1742,6 +1761,63 @@ static void *get_dir_listing(gpointer p)
 		clear_children();
 		int to_list_return;
 		to_list_return = to_list(listing->str, lsfrom->str);
+		GtkTreeIter child;
+		gchar *icon = NULL;
+		gchar *dir = NULL;
+		gchar *name = NULL;
+		gchar *rootdir = g_strdup_printf("%s/", g_path_get_dirname(g_path_get_dirname(root_dir->str)));
+		gint cmp, doing_delete = 0;
+		if (delete_files_mode && gtk_tree_store_iter_is_valid(file_store, &parent)) {
+			if (gtk_tree_model_iter_children(GTK_TREE_MODEL(file_store), &child, &parent)) {
+				do {
+					gtk_tree_model_get(GTK_TREE_MODEL(file_store), &child, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &name, -1);
+					cmp = g_strcmp0(icon, GTK_STOCK_DIRECTORY);
+					g_free(icon);
+					if (cmp==0) {
+						if (delete_all_files_mode)
+							add_pending_item(640, name, root_dir->str);
+						doing_delete = 1;
+					} else {
+						if (IS_CURRENT_PROFILE_SFTP)
+							add_pending_item(3, name, g_strdup_printf("rm \"/%s\"", quote_add_slash(name)));
+						else
+							add_pending_item(3, name, g_strdup_printf("DELE %s", name));
+						doing_delete = 2;
+					}
+				} while (gtk_tree_model_iter_next(GTK_TREE_MODEL(file_store), &child));
+				if (doing_delete==2 && delete_all_files_mode) {
+					name = g_path_get_dirname(name);
+					dir = g_strdup_printf("%s/", g_path_get_dirname(g_path_get_dirname(name)));
+					if (g_strcmp0(dir, "./")!=0 && g_strcmp0(dir, rootdir)!=0) {
+						if (g_strcmp0(g_strdup_printf("%s/", name), root_dir->str)!=0) {
+							if (IS_CURRENT_PROFILE_SFTP)
+								add_pending_item(3, dir, g_strdup_printf("rmdir \"/%s\"", quote_add_slash(name)));
+							else
+								add_pending_item(3, dir, g_strdup_printf("RMD %s/", name));
+							name = g_strdup_printf("%s/", g_path_get_dirname(name));
+							if (g_strcmp0(name, "./")!=0 && g_strcmp0(dir, rootdir)!=0){
+								add_pending_item(640, name, root_dir->str);
+							}
+						}
+					} else {
+						add_pending_item(640, root_dir->str, root_dir->str);
+					}
+				}
+				doing_delete = 0;
+			} else if (delete_all_files_mode) {
+				gtk_tree_model_get(GTK_TREE_MODEL(file_store), &parent, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &name, -1);
+				dir = g_strdup_printf("%s/", g_path_get_dirname(g_path_get_dirname(name)));
+				if (g_strcmp0(dir, "./")!=0 && g_strcmp0(dir, rootdir)!=0) {
+					if (IS_CURRENT_PROFILE_SFTP)
+						add_pending_item(3, dir, g_strdup_printf("rmdir \"/%s\"", quote_add_slash(name)));
+					else
+						add_pending_item(3, dir, g_strdup_printf("RMD %s", name));
+					add_pending_item(640, dir, root_dir->str);
+				} else {
+					add_pending_item(701, "complete", "");
+				}
+			}
+		}
 		if (to_list_return==0) {
 			last_tree_view_pos(FALSE);
 			gdk_threads_enter();
@@ -1749,12 +1825,7 @@ static void *get_dir_listing(gpointer p)
 			if (auto_scroll) fileview_scroll_to_iter(&parent);
 			gdk_threads_leave();
 			if (index_mode || download_files_mode) {
-				GtkTreeIter child;
 				if (gtk_tree_store_iter_is_valid(file_store, &parent) && gtk_tree_model_iter_children(GTK_TREE_MODEL(file_store), &child, &parent)) {
-					gchar *icon = NULL;
-					gchar *dir = NULL;
-					gchar *name = NULL;
-					gint cmp;
 					if (index_mode) {
 						do {
 							gtk_tree_model_get(GTK_TREE_MODEL(file_store), &child, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &dir, -1);
@@ -1920,6 +1991,8 @@ static void execute()
 				case 600:
 				case 610:
 				case 620:
+				case 630:
+				case 640:
 				case 3: {
 					gchar *dn;
 					if (type==3 && g_strcmp0(local, "")==0) { //create file mode
@@ -1935,10 +2008,7 @@ static void execute()
 					if (type==600) {
 						ls = g_list_append(ls, GINT_TO_POINTER(0)); //no read-cache
 						ls = g_list_append(ls, GINT_TO_POINTER(1)); //index mode
-					}else if (type==610 || type==620) {
-						ls = g_list_append(ls, GINT_TO_POINTER(0)); //no read-cache
-						ls = g_list_append(ls, GINT_TO_POINTER(0)); //no index mode
-					}else{
+					} else {
 						if (type==222 || type==2222 || type==2223)
 							ls = g_list_append(ls, GINT_TO_POINTER(1));
 						else
@@ -1947,7 +2017,7 @@ static void execute()
 					}
 					ls = g_list_append(ls, GINT_TO_POINTER(type==3)); //to use commands
 					ls = g_list_append(ls, GINT_TO_POINTER(type==2223)); //to auto-scroll
-					ls = g_list_append(ls, GINT_TO_POINTER(type)); //download files mode
+					ls = g_list_append(ls, GINT_TO_POINTER(type)); //download/delete files mode
 					to_get_dir_listing(ls);
 					break;
 				}
@@ -1964,6 +2034,10 @@ static void execute()
 					execute_end(211);
 					break;
 				}
+				case 701:
+					always_show_hidden_files -= 1;
+					execute_end(701);
+					break;
 				default: {
 					running = FALSE;
 					gtk_widget_set_sensitive(toolbar.abort, FALSE);
@@ -1983,7 +2057,7 @@ static void execute_end(gint type)
 		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 6, &ptype, -1);
 		
 		if (type==ptype) delete = TRUE;
-		if (type==2 && (ptype==2222 || ptype==2223 || ptype==222 || ptype==22 || ptype==600 || ptype==610 || ptype==620)) delete = TRUE;
+		if (type==2 && (ptype==2222 || ptype==2223 || ptype==222 || ptype==22 || ptype==600 || ptype==610 || ptype==620 || ptype==630 || ptype==640)) delete = TRUE;
 		
 		if (delete) {
 			gtk_list_store_remove(GTK_LIST_STORE(pending_store), &current_pending);
@@ -2090,6 +2164,7 @@ static void to_connect(GtkMenuItem *menuitem, int p)
 static void *disconnect(gpointer p)
 {
 	to_abort = TRUE;
+	always_show_hidden_files = 0;
 	gtk_tool_button_set_stock_id(GTK_TOOL_BUTTON(toolbar.connect), GTK_STOCK_CONNECT);
 	if (curl) {
 		log_new_str(COLOR_RED, "Disconnected.");
@@ -2202,11 +2277,11 @@ static GtkWidget *create_popup_menu(void)
 	
 	item = gtk_menu_item_new_with_mnemonic("_3. Delete all files in this folder");
 	gtk_container_add(GTK_CONTAINER(submenu), item);
-	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)404);
+	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)630);
 	
 	item = gtk_menu_item_new_with_mnemonic("_4. Delete all files and folders in this folder");
 	gtk_container_add(GTK_CONTAINER(submenu), item);
-	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)404);
+	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)640);
 	
 	gtk_widget_show_all(submenu);
 	
@@ -2966,6 +3041,7 @@ static gboolean on_abort_check_aborted(gpointer user_data)
 	if (gtk_tree_model_iter_n_children(GTK_TREE_MODEL(pending_store), NULL)==0) {
 		log_new_str(COLOR_RED, "Aborted by user.");
 		to_abort = FALSE;
+		always_show_hidden_files = 0;
 		return FALSE;
 	}
 	return TRUE;
@@ -2992,6 +3068,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 	list = gtk_tree_selection_get_selected_rows(treesel, &model);
 	GtkTreeIter iter;
 	gchar *name = NULL;
+	gchar *last_used_name = NULL;
 	gchar *icon = NULL;
 	GtkTreePath *treepath;
 	gint i, j;
@@ -3268,17 +3345,6 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				index_and_search(name);
 				break;
 			case 610: //download all files in folder
-				for (i=0; i<g_list_length(list); i++) {
-					treepath = g_list_nth_data(list, i);
-					gtk_tree_model_get_iter(model, &iter, treepath);
-					gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
-					if (!is_folder_selected(list)) {
-						name = g_path_get_dirname(name);
-					}
-					if (g_strcmp0(name, ".")==0) name = "";
-					add_pending_item(610, name, name);
-				}
-				break;
 			case 620: //download all files and folders in folder
 				for (i=0; i<g_list_length(list); i++) {
 					treepath = g_list_nth_data(list, i);
@@ -3288,8 +3354,27 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 						name = g_path_get_dirname(name);
 					}
 					if (g_strcmp0(name, ".")==0) name = "";
-					return_download_local_dir(name); //create empty folders
-					add_pending_item(620, name, name);
+					if (type==620) return_download_local_dir(name); //create empty folders
+					add_pending_item(type, name, name);
+				}
+				break;
+			case 630: //delete all files in folder
+			case 640: //delete all files and folders in folder
+				for (i=0; i<g_list_length(list); i++) {
+					treepath = g_list_nth_data(list, i);
+					gtk_tree_model_get_iter(model, &iter, treepath);
+					gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+					if (!is_folder_selected(list)) {
+						name = g_path_get_dirname(name);
+					}
+					if (g_strcmp0(name, ".")==0) name = "";
+					if (!is_folder_selected(list)) name = g_strconcat(name, "/", NULL);
+					if (last_used_name!=NULL && g_strcmp0(last_used_name, name)==0)
+						continue;
+					else
+						last_used_name = g_strdup(name);
+					add_pending_item(type, name, name);
+					always_show_hidden_files += 1;
 				}
 				break;
 			case 999: {

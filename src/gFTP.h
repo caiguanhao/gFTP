@@ -29,6 +29,7 @@ static gchar *config_file, *profiles_file, *cache_file, *hosts_file, *tmp_dir;
 static gboolean running = FALSE;
 static gboolean to_abort = FALSE;
 static gboolean adding = FALSE;
+static gint always_show_hidden_files = 0;
 static gint page_number = 0, config_page_number = 0;
 static gint last_file_view_y = 0;
 static GtkTreePath *drag_begin_selected;
@@ -204,5 +205,6 @@ static gboolean is_single_selection(GtkTreeSelection *treesel);
 static gboolean is_folder_selected(GList *selected_items);
 static gchar *return_download_local_dir(gchar *name);
 static gchar *local_or_tmp_directory();
+static gchar *quote_add_slash(gchar *src);
 
 #endif
