@@ -118,6 +118,7 @@ static struct
 
 static struct
 {
+	GtkWidget *viewonweb;
 	GtkWidget *rename;
 	GtkWidget *shf;
 	gulong shf_handler_id;
@@ -148,6 +149,7 @@ static struct
 	gboolean autoreload;
 	gboolean enable_hosts;
 	gboolean confirm_delete;
+	gchar *download_path;
 } current_settings;
 
 static struct 

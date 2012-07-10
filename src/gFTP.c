@@ -2193,6 +2193,7 @@ static GtkWidget *create_popup_menu(void)
 	item = gtk_menu_item_new_with_mnemonic("_View on the Web");
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	g_signal_connect(item, "activate", G_CALLBACK(on_menu_item_clicked), (gpointer)999);
+	popup.viewonweb = item;
 	
 	item = gtk_separator_menu_item_new();
 	gtk_container_add(GTK_CONTAINER(menu), item);
@@ -2366,7 +2367,10 @@ static gchar *encrypt(gchar *src)
 static gchar *return_download_local_dir(gchar *name)
 {
 	gchar *filepath;
-	filepath = local_or_tmp_directory();
+	if (current_settings.download_path)
+		filepath = current_settings.download_path;
+	else
+		filepath = local_or_tmp_directory();
 	if (g_strcmp0(g_path_get_dirname(name), ".")!=0)
 		filepath = g_strconcat(filepath, "/", g_path_get_dirname(name), NULL);
 	g_mkdir_with_parents(filepath, 0777);
@@ -3345,38 +3349,69 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 				index_and_search(name);
 				break;
 			case 610: //download all files in folder
-			case 620: //download all files and folders in folder
-				for (i=0; i<g_list_length(list); i++) {
-					treepath = g_list_nth_data(list, i);
-					gtk_tree_model_get_iter(model, &iter, treepath);
-					gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
-					if (!is_folder_selected(list)) {
-						name = g_path_get_dirname(name);
+			case 620: { //download all files and folders in folder
+				gchar *path, *msg, *filesfolders;
+				if (type==610) {
+					filesfolders = "files";
+				} else {
+					filesfolders = "files and folders";
+				}
+				msg = "Download %s to:";
+				if (current_settings.download_path) {
+					path = current_settings.download_path;
+					msg = g_strconcat(msg, " (if you want to use the default location, click cancel and try again)", NULL);
+				} else {
+					path = return_download_local_dir("");
+				}
+				msg = g_strdup_printf(msg, filesfolders);
+				path = run_file_chooser(msg, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, path);
+				if (path!=NULL) {
+					current_settings.download_path = path;
+					for (i=0; i<g_list_length(list); i++) {
+						treepath = g_list_nth_data(list, i);
+						gtk_tree_model_get_iter(model, &iter, treepath);
+						gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+						if (!is_folder_selected(list)) {
+							name = g_path_get_dirname(name);
+						}
+						if (g_strcmp0(name, ".")==0) name = "";
+						if (!is_folder_selected(list)) name = g_strconcat(name, "/", NULL);
+						if (type==620) return_download_local_dir(name); //create empty folders
+						add_pending_item(type, name, name);
 					}
-					if (g_strcmp0(name, ".")==0) name = "";
-					if (type==620) return_download_local_dir(name); //create empty folders
-					add_pending_item(type, name, name);
+				} else {
+					current_settings.download_path = NULL;
 				}
 				break;
+			}
 			case 630: //delete all files in folder
-			case 640: //delete all files and folders in folder
-				for (i=0; i<g_list_length(list); i++) {
-					treepath = g_list_nth_data(list, i);
-					gtk_tree_model_get_iter(model, &iter, treepath);
-					gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
-					if (!is_folder_selected(list)) {
-						name = g_path_get_dirname(name);
+			case 640: { //delete all files and folders in folder
+				gchar *deleteallfilesandfoldersornot;
+				if (type==630) {
+					deleteallfilesandfoldersornot = "files";
+				} else {
+					deleteallfilesandfoldersornot = "files and folders";
+				}
+				if (dialogs_show_question("Are you sure you want to delete all %s in these folders?", deleteallfilesandfoldersornot)) {
+					for (i=0; i<g_list_length(list); i++) {
+						treepath = g_list_nth_data(list, i);
+						gtk_tree_model_get_iter(model, &iter, treepath);
+						gtk_tree_model_get(GTK_TREE_MODEL(file_store), &iter, FILEVIEW_COLUMN_DIR, &name, -1);
+						if (!is_folder_selected(list)) {
+							name = g_path_get_dirname(name);
+						}
+						if (g_strcmp0(name, ".")==0) name = "";
+						if (!is_folder_selected(list)) name = g_strconcat(name, "/", NULL);
+						if (last_used_name!=NULL && g_strcmp0(last_used_name, name)==0)
+							continue;
+						else
+							last_used_name = g_strdup(name);
+						add_pending_item(type, name, name);
+						always_show_hidden_files += 1;
 					}
-					if (g_strcmp0(name, ".")==0) name = "";
-					if (!is_folder_selected(list)) name = g_strconcat(name, "/", NULL);
-					if (last_used_name!=NULL && g_strcmp0(last_used_name, name)==0)
-						continue;
-					else
-						last_used_name = g_strdup(name);
-					add_pending_item(type, name, name);
-					always_show_hidden_files += 1;
 				}
 				break;
+			}
 			case 999: {
 				load_profiles(2);
 				treepath = g_list_nth_data(list, 0);
@@ -3406,11 +3441,46 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
 	treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
 	list = gtk_tree_selection_get_selected_rows(treesel, &model);
 	
-	if (is_single_selection(treesel)) {
-		GtkTreePath *treepath = list->data;
-		GtkTreeIter iter;
+	GtkTreePath *treepath;
+	GtkTreeIter iter;
+	gchar *name;
+	if (g_list_length(list)>1) {
+		gint i;
+		gchar *icon;
+		gchar *path;
+		gchar *msg;
+		GList *selfiles = NULL;
+		for (i=0; i<g_list_length(list); i++) {
+			treepath = g_list_nth_data(list, i);
+			gtk_tree_model_get_iter(model, &iter, treepath);
+			gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_ICON, &icon, FILEVIEW_COLUMN_DIR, &name, -1);
+			if (!utils_str_equal(icon, GTK_STOCK_DIRECTORY)) {
+				selfiles = g_list_append(selfiles, name);
+			}
+		}
+		if (g_list_length(selfiles)>0) {
+			msg = "Download selected files to:";
+			if (current_settings.download_path) {
+				path = current_settings.download_path;
+				msg = g_strconcat(msg, " (if you want to use the default location, click cancel and try again)", NULL);
+			} else {
+				path = return_download_local_dir("");
+			}
+			path = run_file_chooser(msg, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, path);
+			if (path!=NULL) {
+				current_settings.download_path = path;
+				for (i=0; i<g_list_length(selfiles); i++) {
+					name = g_list_nth_data(selfiles, i);
+					add_pending_item(11, name, return_download_local_dir(name));
+				}
+				g_list_free(selfiles);
+			} else {
+				current_settings.download_path = NULL;
+			}
+		}
+	} else if (is_single_selection(treesel)) {
+		treepath = list->data;
 		gtk_tree_model_get_iter(model, &iter, treepath);
-		gchar *name;
 		gtk_tree_model_get(model, &iter, FILEVIEW_COLUMN_DIR, &name, -1);
 		if (is_folder_selected(list)) {
 			gtk_tree_model_get_iter(model, &parent, treepath);
@@ -3534,6 +3604,7 @@ static gboolean on_button_press(GtkWidget *widget, GdkEventButton *event, gpoint
 		if (popup_menu==NULL) popup_menu = create_popup_menu();
 		gtk_menu_popup(GTK_MENU(popup_menu), NULL, NULL, NULL, NULL, event->button, event->time);
 		
+		gtk_widget_set_sensitive(popup.viewonweb, g_list_length(list)==1);
 		gtk_widget_set_sensitive(popup.rename, g_list_length(list)==1);
 		
 		if (!is_single_selection(treesel)) {
@@ -3603,6 +3674,7 @@ static gboolean on_key_release(GtkWidget *widget, GdkEventKey *event, gpointer u
 				treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(file_view));
 				list = gtk_tree_selection_get_selected_rows(treesel, &model);
 				
+				gtk_widget_set_sensitive(popup.viewonweb, g_list_length(list)==1);
 				gtk_widget_set_sensitive(popup.rename, g_list_length(list)==1);
 				
 				g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
