@@ -66,7 +66,7 @@ It's convenient to test building plugins in Geany. Here's my experience:
    
  * Open gFTP.c in Geany and click Build > Set Build Commands.
    In C commands (Build), type 
-   gcc -shared -Wall -o "%e.so" "%f" `pkg-config --cflags --libs libcurl geany`
+   gcc -shared -Wall -fPIC -o "%e.so" "%f" `pkg-config --cflags --libs libcurl geany`
    
    Set the Extra Plugin Path (Edit > Preference > General) to where the 
    new gFTP.so is built. To test, press F9 or click Build > Build.

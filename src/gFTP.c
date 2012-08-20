@@ -1323,7 +1323,7 @@ static void *download_file(gpointer p)
 	gboolean continuous_download = FALSE;
 	GString *dlfrom = g_string_new((gchar *)g_list_nth_data(dl, 0));
 	GString *dlto = g_string_new((gchar *)g_list_nth_data(dl, 1));
-	if ((gint)g_list_nth_data(dl, 2)==1) continuous_download = TRUE;
+	if ((size_t)g_list_nth_data(dl, 2)==1) continuous_download = TRUE;
 	gint gtype = continuous_download?11:1;
 	if (curl) {
 		FILE *fp;
@@ -1594,10 +1594,10 @@ static void *get_dir_listing(gpointer p)
 	gboolean delete_all_files_mode = FALSE;
 	gint i, gtype = 2;
 	glong file_method = CURLFTPMETHOD_NOCWD;
-	if ((gint)g_list_nth_data(ls, 3)==1) cache_enabled = TRUE;
-	if ((gint)g_list_nth_data(ls, 4)==1) index_mode = TRUE;
-	if ((gint)g_list_nth_data(ls, 5)==1) command_mode = TRUE;
-	switch((gint)g_list_nth_data(ls, 7)){
+	if ((size_t)g_list_nth_data(ls, 3)==1) cache_enabled = TRUE;
+	if ((size_t)g_list_nth_data(ls, 4)==1) index_mode = TRUE;
+	if ((size_t)g_list_nth_data(ls, 5)==1) command_mode = TRUE;
+	switch((size_t)g_list_nth_data(ls, 7)){
 		case 620:
 			download_all_files_mode = TRUE;
 		case 610:
@@ -1646,7 +1646,7 @@ static void *get_dir_listing(gpointer p)
 		if (!redefine_parent_iter(lsto->str, TRUE)) {
 			if (!create_file_mode) goto end;
 		} else
-			if ((gint)g_list_nth_data(ls, 6)==1)
+			if ((size_t)g_list_nth_data(ls, 6)==1)
 				auto_scroll = TRUE;
 	}
 	GString *str;
@@ -3064,7 +3064,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 	g_return_if_fail(adding==FALSE);
 	g_return_if_fail(to_abort==FALSE);
 	adding = TRUE;
-	gint type = (int)user_data;
+	gint type = (size_t)user_data;
 	GtkTreeSelection *treesel;
 	GtkTreeModel *model = GTK_TREE_MODEL(file_store);
 	GList *list;
@@ -3578,7 +3578,7 @@ static void on_proxy_profiles_clicked(gpointer p)
 			gtk_widget_show(item);
 			gtk_container_add(GTK_CONTAINER(menu), item);
 			gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), (current_settings.current_proxy==i+1));
-			g_signal_connect(item, "activate", G_CALLBACK(to_use_proxy), (gpointer)i+1);
+			g_signal_connect(item, "activate", G_CALLBACK(to_use_proxy), GINT_TO_POINTER(i+1));
 		}
 		gtk_menu_popup(GTK_MENU(menu), NULL, NULL, (GtkMenuPositionFunc)menu_position_func, toolbar.proxy, 0, GDK_CURRENT_TIME);
 	} else {
@@ -3762,7 +3762,7 @@ static void *on_name_edited(GtkWidget *widget, GdkEventKey *event, GtkDialog *di
 		gtk_dialog_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
 		return FALSE;
 	}
-	g_object_set_data(G_OBJECT(pref.name), "name-edited", (gpointer)(g_strcmp0(gtk_entry_get_text(GTK_ENTRY(pref.name)), "")!=0));
+	g_object_set_data(G_OBJECT(pref.name), "name-edited", GINT_TO_POINTER(g_strcmp0(gtk_entry_get_text(GTK_ENTRY(pref.name)), "")!=0));
 	return on_host_login_password_changed(NULL, NULL, NULL);
 }
 
@@ -4000,7 +4000,7 @@ static gchar* new_names(gchar *name)
 	GSList *nums = NULL;
 	gint num;
 	for (num=100; num>0; num--)
-		nums = g_slist_prepend(nums, (gpointer)num);
+		nums = g_slist_prepend(nums, GINT_TO_POINTER(num));
 	
 	gchar *pname;
 	pname = g_regex_escape_string(oname, -1);
@@ -4017,7 +4017,7 @@ static gchar* new_names(gchar *name)
 			g_regex_match(regex, names, 0, &match_info);
 			if (g_match_info_matches(match_info)) {
 				num = g_ascii_strtoll(g_match_info_fetch(match_info, 1), NULL, 0);
-				nums = g_slist_remove_all(nums, (gpointer)num);
+				nums = g_slist_remove_all(nums, GINT_TO_POINTER(num));
 			}
 			g_free(names);
 		}
@@ -4025,7 +4025,7 @@ static gchar* new_names(gchar *name)
 	}
 	
 	for (num=1; num<g_slist_length(nums); num++) {
-		oname = g_strdup_printf("%s (%d)", oname, (gint)g_slist_nth_data(nums, num));
+		oname = g_strdup_printf("%s (%zd)", oname, (size_t)g_slist_nth_data(nums, num));
 		break;
 	}
 	g_match_info_free(match_info);
@@ -4054,7 +4054,7 @@ static void on_profile_organize_clicked(GtkToolButton *toolbutton, gpointer p)
 	GtkTreeIter iter2;
 	gtk_tree_model_get_iter_from_string(GTK_TREE_MODEL(pref.store), &iter, gtk_tree_path_to_string(path));
 	int n = gtk_tree_model_iter_n_children(gtk_tree_view_get_model(GTK_TREE_VIEW(pref.p_view)),NULL);
-	switch ((int)p) {
+	switch ((size_t)p) {
 		case 1:
 			pathx = gtk_tree_path_new_from_string("0");
 			gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(pref.p_view), pathx, NULL, FALSE, 0.0, 0.0);
