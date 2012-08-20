@@ -3077,6 +3077,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 	GtkTreePath *treepath;
 	gint i, j;
 	gint selected_items;
+	gtk_widget_grab_focus(fileview_scroll); //if fileview is focused, when pressing enter in rename dialog will also trigger fileview's on_key_release
 	if (is_selected(treesel)) {
 		switch (type) {
 			case 2:
@@ -3306,7 +3307,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 										add_pending_item(3, name, g_strdup_printf("rename \"/%s%s\" \"/%s%s\"", quote_add_slash(name), quote_add_slash(dirname), quote_add_slash(name), quote_add_slash(reto)));
 									else
 										add_pending_item(3, name, g_strdup_printf("RNFR %s\nRNTO %s", dirname, reto));
-									if (current_settings.autoreload && redefine_parent_iter(name, FALSE)) add_pending_item(22, name, NULL);
+									add_pending_item(211, reto, NULL);
 								}
 								end:
 								g_free(reto);
