@@ -17,6 +17,15 @@ PLUGIN_SET_INFO("gFTP", "FTP Plugin for Geany.", "1.0", "Cai Guanhao <caiguanhao
 
 PLUGIN_KEY_GROUP(gFTP, KB_COUNT)
 
+static gchar *format_size(goffset size)
+{
+#if GLIB_CHECK_VERSION(2, 30, 0)
+	return g_format_size(size);
+#else
+	return g_format_size_for_display(size);
+#endif
+}
+
 static void try_another_username_password(gchar *raw)
 {
 	gdk_threads_enter();
@@ -98,12 +107,11 @@ static void log_new_str(gint color, gchar *text)
 	GTimeVal ct;
 	g_get_current_time(&ct);
 	time_t tm1, tm2;
-	struct tm *t1, *t2;
+	struct tm *t1;
 	long sec = 0;
 	tm1 = time(NULL);
-	t2 = gmtime(&tm1);
-	tm2 = mktime(t2);
-	t1 = localtime(&tm1);
+	t1 = gmtime(&tm1);
+	tm2 = mktime(t1);
 	sec = ct.tv_sec + (long)(tm1 -tm2);
 	msgwin_msg_add(color, -1, NULL, "[%02ld:%02ld:%02ld.%03.0f] %s", 
 	(sec/3600)%24, (sec/60)%60, (sec)%60, (double)(ct.tv_usec)/ 1000, text);
@@ -350,7 +358,7 @@ static int add_item(gpointer data, gboolean is_dir)
 		filename = g_strconcat(parts[0], is_dir?"/":"", NULL);
 	}
 	gint64 size = g_ascii_strtoll(parts[1], NULL, 0);
-	gchar *tsize = g_format_size_for_display(size);
+	gchar *tsize = format_size(size);
 	gtk_tree_store_set(file_store, &iter,
 	FILEVIEW_COLUMN_ICON, is_dir?GTK_STOCK_DIRECTORY:GTK_STOCK_FILE, 
 	FILEVIEW_COLUMN_NAME, parts[0], 
@@ -505,7 +513,7 @@ static int download_progress (void *p, double dltotal, double dlnow, double ulto
 	double speed;
 	if (dlnow!=0 && now_us - prev_us > 0.1) {
 		speed = (dlnow - dlspeed->prev_s)/(now_us - prev_us);
-		doneper = g_strdup_printf("%s (%s/s)", g_format_size_for_display(dlnow), g_format_size_for_display(speed));
+		doneper = g_strdup_printf("%s (%s/s)", format_size(dlnow), format_size(speed));
 		gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
 		
 		dlspeed->prev_s = dlnow;
@@ -567,7 +575,7 @@ static size_t read_callback(void *ptr, size_t size, size_t nmemb, void *p)
 	double speed;
 	if (now_us - prev_us > 0.1) {
 		speed = (file->transfered - file->prev_s)/(now_us - prev_us);
-		doneper = g_strdup_printf("%s (%s/s)", g_format_size_for_display(file->transfered), g_format_size_for_display(speed));
+		doneper = g_strdup_printf("%s (%s/s)", format_size(file->transfered), format_size(speed));
 		gtk_progress_bar_set_text(GTK_PROGRESS_BAR(geany->main_widgets->progressbar), doneper);
 		
 		file->prev_s = file->transfered;
@@ -962,7 +970,7 @@ static void *search_file_name(gpointer entry)
 				0, ftp.flagtrycwd==1?GTK_STOCK_DIRECTORY:GTK_STOCK_FILE,
 				1, location,
 				2, ftp.size,
-				3, g_format_size_for_display(ftp.size),
+				3, format_size(ftp.size),
 				4, format_datetime("%Y-%m-%d", g_strdup_printf("%lu", ftp.mtime)), 
 				-1);
 				gdk_threads_leave();
@@ -1355,7 +1363,7 @@ static void *download_file(gpointer p)
 		curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &val);
 		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Total download time: %0.3f s.", val));
 		curl_easy_getinfo(curl, CURLINFO_SPEED_DOWNLOAD, &val);
-		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Average download speed: %s/s.", g_format_size_for_display(val)));
+		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Average download speed: %s/s.", format_size(val)));
 		if (!to_abort && dlto->str)
 			if (!document_open_file(dlto->str, FALSE, NULL, NULL))
 				if (dialogs_show_question("Could not open the file in Geany. View it in file browser?"))
@@ -1403,7 +1411,7 @@ static void *upload_file(gpointer p)
 		curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &val);
 		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Total upload time: %0.3f s.", val));
 		curl_easy_getinfo(curl, CURLINFO_SPEED_UPLOAD, &val);
-		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Average upload speed: %s/s.", g_format_size_for_display(val)));
+		if (val>0) log_new_str(COLOR_BLUE, g_strdup_printf("Average upload speed: %s/s.", format_size(val)));
 	}
 	gdk_threads_leave();
 	end:
