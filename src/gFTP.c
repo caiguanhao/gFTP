@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ftpparse.c"
+#include "NppFTPPW.c"
 #include "gFTP.h"
 
 GeanyPlugin *geany_plugin;
@@ -4298,6 +4299,138 @@ static void on_delete_profile_clicked()
 	}
 }
 
+static void on_nppftp_password_buttons_clicked(GtkButton *button, gpointer p)
+{
+	_DefaultKey = (char *)malloc((KeySize+1)*sizeof(char));
+	strncpy(_DefaultKey, defaultString, KeySize);
+	gchar *masterpass = (gchar *)gtk_entry_get_text(GTK_ENTRY(nppftppw.mp_plain));
+	gchar *profilepass = (gchar *)gtk_entry_get_text(GTK_ENTRY(nppftppw.pp_plain));
+	if (g_utf8_strlen(masterpass, -1)==0) masterpass = NULL;
+	if (g_utf8_strlen(profilepass, -1)==0) profilepass = NULL;
+	gchar *result;
+	switch ((size_t)p) {
+		case 1:
+			if (masterpass) {
+				result = Encrypt(masterpass, -1, "NppFTP", -1);
+				gtk_entry_set_text(GTK_ENTRY(nppftppw.mp_cipher), result);
+			} else {
+				gtk_entry_set_text(GTK_ENTRY(nppftppw.mp_cipher), "");
+			}
+			break;
+		case 2:
+			dialogs_show_msgbox(GTK_MESSAGE_INFO, "Plaintext has 94^8 (6,095,689,385,410,816) possibilities while ciphertext has only 16^12 (281,474,976,710,656) possibilities.\n\nIn other words, 21 passwords have the same ciphertext on average. For example, the ciphertext of 'B' is the same as of 'C'.");
+			break;
+		case 3:
+			if (profilepass) {
+				result = Encrypt(masterpass, -1, profilepass, -1);
+				gtk_entry_set_text(GTK_ENTRY(nppftppw.pp_cipher), result);
+			} else {
+				gtk_entry_set_text(GTK_ENTRY(nppftppw.pp_cipher), "");
+			}
+			break;
+		case 4:
+			result = Decrypt(masterpass, -1, gtk_entry_get_text(GTK_ENTRY(nppftppw.pp_cipher)), TRUE);
+			gtk_entry_set_text(GTK_ENTRY(nppftppw.pp_plain), result);
+			break;
+	}
+}
+
+static gboolean on_nppftp_password_entry_keyrelease(GtkWidget *widget, GdkEventKey *event, gpointer p)
+{
+	switch ((size_t)p) {
+		case 1:
+			on_nppftp_password_buttons_clicked(NULL, GINT_TO_POINTER(1));
+			on_nppftp_password_buttons_clicked(NULL, GINT_TO_POINTER(3));
+			break;
+		case 2:
+			break;
+		default:
+			on_nppftp_password_buttons_clicked(NULL, p);
+	}
+	return TRUE;
+}
+
+static void on_nppftp_password(GtkButton *button, gpointer p)
+{
+	GtkWidget *dialog, *vbox, *table, *widget;
+	dialog = gtk_dialog_new_with_buttons("Encrypt/Decrypt an NppFTP Password", GTK_WINDOW(p),
+		GTK_DIALOG_DESTROY_WITH_PARENT | GTK_DIALOG_NO_SEPARATOR, 
+		NULL);
+	gtk_window_set_resizable(GTK_WINDOW(dialog), FALSE);
+	vbox = ui_dialog_vbox_new(GTK_DIALOG(dialog));
+	GdkPixbuf *pb = gtk_window_get_icon(GTK_WINDOW(geany->main_widgets->window));
+	gtk_window_set_icon(GTK_WINDOW(dialog), pb);
+	
+	table = gtk_table_new(11, 3, FALSE);
+	
+	widget = gtk_label_new("Master Password");
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 3, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_hseparator_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 3, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+
+	widget = gtk_label_new("Plaintext:");
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_widget_set_size_request(widget, 300, -1);
+	gtk_entry_set_max_length(GTK_ENTRY(widget), 8);
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_nppftp_password_entry_keyrelease), GINT_TO_POINTER(1));
+	nppftppw.mp_plain = widget;
+	widget = gtk_button_new_with_mnemonic("_Encrypt");
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_nppftp_password_buttons_clicked), GINT_TO_POINTER(1));
+
+	widget = gtk_label_new("Ciphertext:");
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_nppftp_password_entry_keyrelease), GINT_TO_POINTER(2));
+	nppftppw.mp_cipher = widget;
+	widget = gtk_button_new_with_mnemonic("_Decrypt");
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_nppftp_password_buttons_clicked), GINT_TO_POINTER(2));
+	
+	gtk_table_attach(GTK_TABLE(table), gtk_label_new(""), 0, 3, 4, 5, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	
+	widget = gtk_label_new("Profile Password");
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 3, 5, 6, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_hseparator_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 3, 6, 7, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	
+	widget = gtk_label_new("Plaintext:");
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 7, 8, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 7, 8, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_nppftp_password_entry_keyrelease), GINT_TO_POINTER(3));
+	nppftppw.pp_plain = widget;
+	widget = gtk_button_new_with_mnemonic("E_ncrypt");
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 7, 8, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_nppftp_password_buttons_clicked), GINT_TO_POINTER(3));
+	
+	widget = gtk_label_new("Ciphertext:");
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 8, 9, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_entry_new();
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 8, 9, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_nppftp_password_entry_keyrelease), GINT_TO_POINTER(4));
+	nppftppw.pp_cipher = widget;
+	widget = gtk_button_new_with_mnemonic("D_ecrypt");
+	gtk_table_attach(GTK_TABLE(table), widget, 2, 3, 8, 9, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_nppftp_password_buttons_clicked), GINT_TO_POINTER(4));
+	
+	gtk_table_attach(GTK_TABLE(table), gtk_label_new(""), 0, 3, 9, 10, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	
+	widget = gtk_label_new("NppFTP stores passwords in file /Documents and Settings/<CurrentUser>/Application Data/Notepad++/plugin/config/NppFTP/NppFTP.xml or /Users/<CurrentUser>/AppData/Roaming/Notepad++/plugins/config/NppFTP/NppFTP.xml");
+	gtk_label_set_line_wrap(GTK_LABEL(widget), TRUE);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 3, 10, 11, GTK_FILL | GTK_EXPAND, GTK_FILL | GTK_EXPAND, 2, 2);
+	
+	gtk_box_pack_start(GTK_BOX(vbox), table, FALSE, FALSE, 0);
+	
+	gtk_widget_show_all(dialog);
+	
+	gtk_dialog_run(GTK_DIALOG(dialog));
+	gtk_widget_destroy(dialog);
+}
+
 static void on_delete_proxy_profile_clicked()
 {
 	GtkTreeIter iter;
@@ -4967,7 +5100,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_widget_show_all(hbox);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), table, hbox);
 	
-	table = gtk_table_new(9, 5, FALSE);
+	table = gtk_table_new(10, 5, FALSE);
 	
 	store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 	gtk_list_store_append(store, &iter);
@@ -5065,6 +5198,12 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(widget), current_settings.confirm_delete);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 8, 9, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	pref.confirm_delete = widget;
+	
+	widget = gtk_button_new_with_mnemonic("NppFTP Password Encryption/Decryption...");
+	gtk_widget_set_tooltip_text(widget, "Encrypt or decrypt a password using NppFTP's algorithm.");
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 9, 10, GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_nppftp_password), dialog);
+	pref.decrypt_nppftp = widget;
 	
 	load_settings(1);
 	

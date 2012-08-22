@@ -112,6 +112,7 @@ static struct
 	GtkWidget *showhiddenfiles;
 	GtkWidget *enable_hosts;
 	GtkWidget *confirm_delete;
+	GtkWidget *decrypt_nppftp;
 	
 	GtkWidget *notebook;
 } pref;
@@ -125,6 +126,14 @@ static struct
 	GtkWidget *cdl;
 	gulong cdl_handler_id;
 } popup;
+
+static struct
+{
+	GtkWidget *mp_plain;
+	GtkWidget *mp_cipher;
+	GtkWidget *pp_plain;
+	GtkWidget *pp_cipher;
+} nppftppw;
 
 static struct
 {
