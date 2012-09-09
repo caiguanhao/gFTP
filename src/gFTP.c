@@ -1,6 +1,7 @@
 #include <geanyplugin.h>
 #include <openssl/ssl.h>
 #include <curl/curl.h>
+#include <libxml/parser.h>
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
@@ -4431,6 +4432,92 @@ static void on_nppftp_password(GtkButton *button, gpointer p)
 	gtk_widget_destroy(dialog);
 }
 
+static void on_nppftp_import(GtkButton *button, gpointer p)
+{
+	xmlDocPtr doc;
+	xmlNodePtr cur, cur2;
+	gchar *xmlfile = run_file_chooser("Browse NppFTP.xml", GTK_FILE_CHOOSER_ACTION_OPEN, NULL);
+	if (xmlfile == NULL) return;
+	doc = xmlParseFile(xmlfile);
+	if (doc == NULL) {
+		dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Couldn't parse XML.");
+	} else {
+		cur = xmlDocGetRootElement(doc);
+		if (cur == NULL) {
+			dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Empty XML file.");
+		} else {
+			if (xmlStrcmp(cur->name, (const xmlChar *) "NppFTP")) {
+				dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Invalid NppFTP XML file.");
+			} else {
+				gboolean import_password = TRUE;
+				gchar *masterpass = (gchar *)xmlGetProp(cur, (const xmlChar *) "MasterPass");
+				gchar *input_masterpass = NULL;
+				_DefaultKey = (char *)malloc((KeySize+1)*sizeof(char));
+				strncpy(_DefaultKey, defaultString, KeySize);
+				if (masterpass!=NULL) {
+					gchar *input_masterpass_default = "";
+					input_mp:
+					input_masterpass = dialogs_show_input("Input Master Password", GTK_WINDOW(geany->main_widgets->window), "Master Password", input_masterpass_default);
+					if (input_masterpass == NULL) {
+						if (dialogs_show_question("Import without passwords?")) {
+							import_password = FALSE;
+						} else {
+							goto end;
+						}
+					} else if (g_strcmp0(masterpass, Encrypt(input_masterpass, -1, "NppFTP", -1))!=0) {
+						if (dialogs_show_question("Wrong master password. Continue?\n\n- YES: Import without passwords\n- NO: Retry password")) {
+							import_password = FALSE;
+						} else {
+							input_masterpass_default = g_strdup(input_masterpass);
+							goto input_mp;
+						}
+					}
+				}
+				gchar *password;
+				cur = cur->xmlChildrenNode;
+				while (cur != NULL) {
+					if (xmlStrcmp(cur->name, (const xmlChar *) "Profiles")==0) {
+						cur2 = cur->xmlChildrenNode;
+						size_t imported = 0;
+						while (cur2 != NULL) {
+							if (xmlStrcmp(cur2->name, (const xmlChar *) "Profile")==0) {
+								if (import_password) {
+									password = g_strdup(Decrypt(input_masterpass, -1, (gchar *)xmlGetProp(cur2, (const xmlChar *) "password"), TRUE));
+								} else {
+									password = g_strdup("");
+								}
+								gtk_list_store_append(GTK_LIST_STORE(pref.store), &pref.iter_store_new);
+								gtk_list_store_set(GTK_LIST_STORE(pref.store), &pref.iter_store_new, 
+								0, g_strconcat("[NppFTP] ", xmlGetProp(cur2, (const xmlChar *) "name"), NULL), 
+								1, xmlGetProp(cur2, (const xmlChar *) "hostname"), 
+								2, xmlGetProp(cur2, (const xmlChar *) "port"), 
+								3, xmlGetProp(cur2, (const xmlChar *) "username"), 
+								4, password, 
+								5, xmlGetProp(cur2, (const xmlChar *) "initialDir"), 
+								6, "", 
+								7, "", 
+								8, "", 
+								9, "FTP", 
+								10, "", 
+								11, 0, 
+								12, 0, 
+								13, FALSE, 
+								-1);
+								imported += 1;
+							}
+							cur2 = cur2->next;
+						}
+						dialogs_show_msgbox(GTK_MESSAGE_INFO, "%d items imported.", imported);
+					}
+					cur = cur->next;
+				}
+			}
+		}
+	}
+	end:
+	xmlFreeDoc(doc);
+}
+
 static void on_delete_proxy_profile_clicked()
 {
 	GtkTreeIter iter;
@@ -4867,7 +4954,7 @@ void plugin_init(GeanyData *data)
 
 GtkWidget *plugin_configure(GtkDialog *dialog)
 {
-	GtkWidget *widget, *vbox, *hbox, *table, *notebook;
+	GtkWidget *widget, *vbox, *hbox, *table, *notebook, *align;
 	
 	vbox = gtk_vbox_new(FALSE, 6);
 	
@@ -5100,7 +5187,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_widget_show_all(hbox);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), table, hbox);
 	
-	table = gtk_table_new(10, 5, FALSE);
+	table = gtk_table_new(11, 5, FALSE);
 	
 	store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 	gtk_list_store_append(store, &iter);
@@ -5201,9 +5288,19 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	
 	widget = gtk_button_new_with_mnemonic("NppFTP Password Encryption/Decryption...");
 	gtk_widget_set_tooltip_text(widget, "Encrypt or decrypt a password using NppFTP's algorithm.");
-	gtk_table_attach(GTK_TABLE(table), widget, 0, 5, 9, 10, GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	align = gtk_alignment_new(0, 0, 0, 0);
+	gtk_container_add(GTK_CONTAINER(align), widget);
+	gtk_table_attach(GTK_TABLE(table), align, 0, 5, 9, 10, GTK_FILL, GTK_FILL, 2, 2);
 	g_signal_connect(widget, "clicked", G_CALLBACK(on_nppftp_password), dialog);
 	pref.decrypt_nppftp = widget;
+	
+	widget = gtk_button_new_with_mnemonic("Import profiles from NppFTP.xml...");
+	gtk_widget_set_tooltip_text(widget, "Import profiles from an NppFTP's configuration file.");
+	align = gtk_alignment_new(0, 0, 0, 0);
+	gtk_container_add(GTK_CONTAINER(align), widget);
+	gtk_table_attach(GTK_TABLE(table), align, 0, 5, 10, 11, GTK_FILL, GTK_FILL, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_nppftp_import), NULL);
+	pref.import_nppftp = widget;
 	
 	load_settings(1);
 	

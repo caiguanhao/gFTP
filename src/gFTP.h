@@ -113,6 +113,7 @@ static struct
 	GtkWidget *enable_hosts;
 	GtkWidget *confirm_delete;
 	GtkWidget *decrypt_nppftp;
+	GtkWidget *import_nppftp;
 	
 	GtkWidget *notebook;
 } pref;
