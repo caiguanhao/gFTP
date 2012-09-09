@@ -4507,7 +4507,7 @@ static void on_nppftp_import(GtkButton *button, gpointer p)
 							}
 							cur2 = cur2->next;
 						}
-						dialogs_show_msgbox(GTK_MESSAGE_INFO, "%d items imported.", imported);
+						dialogs_show_msgbox(GTK_MESSAGE_INFO, "%zu items imported.", imported);
 					}
 					cur = cur->next;
 				}
