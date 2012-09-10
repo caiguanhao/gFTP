@@ -4518,6 +4518,110 @@ static void on_nppftp_import(GtkButton *button, gpointer p)
 	xmlFreeDoc(doc);
 }
 
+static gchar * on_filezilla_setsafepath(const gchar * path)
+{
+	if (g_str_has_prefix(path, "1 0 ")) {
+		gchar *result = g_strdup("");
+		gchar **c;
+		c = g_strsplit(path, " ", 0);
+		if (g_strv_length(c) <= 3) return "/";
+		size_t i = 0, k = 0, l = 0, a = 0, t = 0;
+		for (i=2; i<g_strv_length(c); i++) {
+			if (k == 0) {
+				l = g_ascii_strtoll(c[i], NULL, 0);
+				k = 1;
+			} else {
+				if (a == 0) result = g_strconcat(result, "/", NULL);
+				if (g_strcmp0(c[i], "") == 0) { // multiple spaces
+					result = g_strconcat(result, " ", NULL);
+					a += 1;
+				} else {
+					if (t == 0) {
+						t = 1;
+					} else {
+						result = g_strconcat(result, " ", NULL);
+						a += 1;
+					}
+					result = g_strconcat(result, c[i], NULL);
+					a += g_utf8_strlen(c[i], -1);
+				}
+				if (a == l) k = l = a = t = 0;
+			}
+		}
+		return result;
+	}
+	return "";
+}
+
+static void on_filezilla_import(GtkButton *button, gpointer p)
+{
+	xmlDocPtr doc;
+	xmlNodePtr cur, cur2, cur3;
+	gchar *xmlfile = run_file_chooser("Browse sitemanager.xml", GTK_FILE_CHOOSER_ACTION_OPEN, NULL);
+	if (xmlfile == NULL) return;
+	doc = xmlParseFile(xmlfile);
+	if (doc == NULL) {
+		dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Couldn't parse XML.");
+	} else {
+		cur = xmlDocGetRootElement(doc);
+		if (cur == NULL) {
+			dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Empty XML file.");
+		} else {
+			if (xmlStrcmp(cur->name, (const xmlChar *) "FileZilla3")) {
+				dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Invalid FileZilla 3 XML file.");
+			} else {
+				cur = cur->xmlChildrenNode;
+				while (cur != NULL) {
+					if (xmlStrcmp(cur->name, (const xmlChar *) "Servers")==0) {
+						cur2 = cur->xmlChildrenNode;
+						size_t imported = 0;
+						while (cur2 != NULL) {
+							if (xmlStrcmp(cur2->name, (const xmlChar *) "Server")==0) {
+								cur3 = cur2->xmlChildrenNode;
+								gtk_list_store_append(GTK_LIST_STORE(pref.store), &pref.iter_store_new);
+								gtk_list_store_set(GTK_LIST_STORE(pref.store), &pref.iter_store_new, 
+								0, "", 1, "", 2, "", 3, "anonymous", 4, "ftp@example.com", 5, "", 6, "", 7, "", 
+								8, "", 9, "FTP", 10, "", 11, 0, 12, 0, 13, FALSE, -1);
+								gchar *val;
+								gint cln;
+								while (cur3 != NULL) {
+									cln = 0;
+									val = g_strdup((const gchar *)xmlNodeListGetString(doc, cur3->xmlChildrenNode, 1));
+									if (val == NULL) val = g_strdup("");
+									if (xmlStrcmp(cur3->name, (const xmlChar *) "Name")==0)
+										gtk_list_store_set(GTK_LIST_STORE(pref.store), &pref.iter_store_new, 0, g_strconcat("[FileZilla] ", val, NULL), -1);
+									else if (xmlStrcmp(cur3->name, (const xmlChar *) "TimezoneOffset")==0) {
+										gint64 timeoff;
+										timeoff = g_ascii_strtoll(val, NULL, 0);
+										gtk_list_store_set(GTK_LIST_STORE(pref.store), &pref.iter_store_new, 11, (size_t) timeoff / 60, -1);
+										gtk_list_store_set(GTK_LIST_STORE(pref.store), &pref.iter_store_new, 12, (size_t) timeoff % 60, -1);
+									} else if (xmlStrcmp(cur3->name, (const xmlChar *) "RemoteDir")==0) {
+										gtk_list_store_set(GTK_LIST_STORE(pref.store), &pref.iter_store_new, 5, on_filezilla_setsafepath(val), -1);
+									} else {
+										if (xmlStrcmp(cur3->name, (const xmlChar *) "Host")==0) cln = 1;
+										if (xmlStrcmp(cur3->name, (const xmlChar *) "Port")==0) cln = 2;
+										if (xmlStrcmp(cur3->name, (const xmlChar *) "User")==0) cln = 3;
+										if (xmlStrcmp(cur3->name, (const xmlChar *) "Pass")==0) cln = 4;
+										if (xmlStrcmp(cur3->name, (const xmlChar *) "LocalDir")==0) cln = 6;
+										if (g_strcmp0(val, "")==0) cln = 0;
+										if (cln>0) gtk_list_store_set(GTK_LIST_STORE(pref.store), &pref.iter_store_new, cln, val, -1);
+									}
+									cur3 = cur3->next;
+								}
+								imported += 1;
+							}
+							cur2 = cur2->next;
+						}
+						dialogs_show_msgbox(GTK_MESSAGE_INFO, "%zu items imported.", imported);
+					}
+					cur = cur->next;
+				}
+			}
+		}
+	}
+	xmlFreeDoc(doc);
+}
+
 static void on_delete_proxy_profile_clicked()
 {
 	GtkTreeIter iter;
@@ -5187,7 +5291,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_widget_show_all(hbox);
 	gtk_notebook_append_page(GTK_NOTEBOOK(notebook), table, hbox);
 	
-	table = gtk_table_new(11, 5, FALSE);
+	table = gtk_table_new(12, 5, FALSE);
 	
 	store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
 	gtk_list_store_append(store, &iter);
@@ -5301,6 +5405,14 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_table_attach(GTK_TABLE(table), align, 0, 5, 10, 11, GTK_FILL, GTK_FILL, 2, 2);
 	g_signal_connect(widget, "clicked", G_CALLBACK(on_nppftp_import), NULL);
 	pref.import_nppftp = widget;
+	
+	widget = gtk_button_new_with_mnemonic("Import profiles from FileZilla...");
+	gtk_widget_set_tooltip_text(widget, "Import profiles from an FileZilla's configuration file.");
+	align = gtk_alignment_new(0, 0, 0, 0);
+	gtk_container_add(GTK_CONTAINER(align), widget);
+	gtk_table_attach(GTK_TABLE(table), align, 0, 5, 11, 12, GTK_FILL, GTK_FILL, 2, 2);
+	g_signal_connect(widget, "clicked", G_CALLBACK(on_filezilla_import), NULL);
+	pref.import_filezilla = widget;
 	
 	load_settings(1);
 	

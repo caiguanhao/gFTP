@@ -25,7 +25,7 @@ Features
  * SFTP/TLSv1/SSLv3 authentication.
  * Cache directory listings.
  * Proxy profiles.
- * Import NppFTP profiles.
+ * Import NppFTP/FileZilla profiles.
 
 
 Usage

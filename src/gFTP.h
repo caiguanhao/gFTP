@@ -114,6 +114,7 @@ static struct
 	GtkWidget *confirm_delete;
 	GtkWidget *decrypt_nppftp;
 	GtkWidget *import_nppftp;
+	GtkWidget *import_filezilla;
 	
 	GtkWidget *notebook;
 } pref;
