@@ -216,7 +216,7 @@ static gchar **parse_proxy_string(gchar *name);
 static gchar *encrypt(gchar *src);
 static gboolean is_single_selection(GtkTreeSelection *treesel);
 static gboolean is_folder_selected(GList *selected_items);
-static gchar *return_download_local_dir(gchar *name);
+static gchar *return_download_local_dir(gchar *name, gboolean allow_using_download_path);
 static gchar *local_or_tmp_directory();
 static gchar *quote_add_slash(gchar *src);
 

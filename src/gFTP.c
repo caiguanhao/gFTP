@@ -420,6 +420,12 @@ static gboolean redefine_parent_iter(gchar *src, gboolean strict_mode)
 	return FALSE;
 }
 
+static gboolean to_last_tree_view_pos(gpointer p)
+{
+	gtk_tree_view_scroll_to_point(GTK_TREE_VIEW(file_view), -1, last_file_view_y);
+	return FALSE;
+}
+
 static void last_tree_view_pos(gboolean newpos)
 {
 	gdk_threads_enter();
@@ -428,7 +434,7 @@ static void last_tree_view_pos(gboolean newpos)
 		gtk_tree_view_get_visible_rect(GTK_TREE_VIEW(file_view), &rect);
 		last_file_view_y = rect.y;
 	} else {
-		gtk_tree_view_scroll_to_point(GTK_TREE_VIEW(file_view), -1, last_file_view_y);
+		g_timeout_add(50, (GSourceFunc)to_last_tree_view_pos, NULL);
 	}
 	gdk_threads_leave();
 }
@@ -1403,7 +1409,7 @@ static void *upload_file(gpointer p)
 		curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, ftp_log);
 		curl_easy_setopt(curl, CURLOPT_DEBUGDATA, NULL);
 		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-		curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_SINGLECWD);
+		curl_easy_setopt(curl, CURLOPT_FTP_FILEMETHOD, CURLFTPMETHOD_NOCWD);
 		curl_easy_perform(curl);
 		fclose(file.fp);
 	}
@@ -1858,11 +1864,11 @@ static void *get_dir_listing(gpointer p)
 							cmp = g_strcmp0(icon, GTK_STOCK_DIRECTORY);
 							g_free(icon);
 							if (cmp!=0) {
-								add_pending_item(11, name, return_download_local_dir(name));
+								add_pending_item(11, name, return_download_local_dir(name, TRUE));
 							} else if (gtk_tree_model_iter_has_child(GTK_TREE_MODEL(file_store), &child)) {
 								break; // if it is already checked
 							} else if (download_all_files_mode) {
-								return_download_local_dir(name); //create empty folders
+								return_download_local_dir(name, TRUE); //create empty folders
 								add_pending_item(620, name, name);
 							}
 							g_free(name);
@@ -2374,10 +2380,10 @@ static gchar *encrypt(gchar *src)
 	return src;
 }
 
-static gchar *return_download_local_dir(gchar *name)
+static gchar *return_download_local_dir(gchar *name, gboolean allow_using_download_path)
 {
 	gchar *filepath;
-	if (current_settings.download_path)
+	if (allow_using_download_path && current_settings.download_path)
 		filepath = current_settings.download_path;
 	else
 		filepath = local_or_tmp_directory();
@@ -3372,7 +3378,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 					path = current_settings.download_path;
 					msg = g_strconcat(msg, " (if you want to use the default location, click cancel and try again)", NULL);
 				} else {
-					path = return_download_local_dir("");
+					path = return_download_local_dir("", TRUE);
 				}
 				msg = g_strdup_printf(msg, filesfolders);
 				path = run_file_chooser(msg, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, path);
@@ -3387,7 +3393,7 @@ static void on_menu_item_clicked(GtkMenuItem *menuitem, gpointer user_data)
 						}
 						if (g_strcmp0(name, ".")==0) name = "";
 						if (!is_folder_selected(list)) name = g_strconcat(name, "/", NULL);
-						if (type==620) return_download_local_dir(name); //create empty folders
+						if (type==620) return_download_local_dir(name, TRUE); //create empty folders
 						add_pending_item(type, name, name);
 					}
 				} else {
@@ -3475,14 +3481,14 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
 				path = current_settings.download_path;
 				msg = g_strconcat(msg, " (if you want to use the default location, click cancel and try again)", NULL);
 			} else {
-				path = return_download_local_dir("");
+				path = return_download_local_dir("", TRUE);
 			}
 			path = run_file_chooser(msg, GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, path);
 			if (path!=NULL) {
 				current_settings.download_path = path;
 				for (i=0; i<g_list_length(selfiles); i++) {
 					name = g_list_nth_data(selfiles, i);
-					add_pending_item(11, name, return_download_local_dir(name));
+					add_pending_item(11, name, return_download_local_dir(name, TRUE));
 				}
 				g_list_free(selfiles);
 			} else {
@@ -3533,7 +3539,7 @@ static void on_open_clicked(GtkMenuItem *menuitem, gpointer p)
 				}
 			}
 		} else {
-			add_pending_item(1, name, return_download_local_dir(name));
+			add_pending_item(1, name, return_download_local_dir(name, FALSE));
 		}
 	}
 	g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
@@ -4647,6 +4653,7 @@ static void on_document_save()
 		if (dst) {
 			add_pending_item(0, dst, filepath);
 			if (current_settings.autoreload && redefine_parent_iter(dst, FALSE)) add_pending_item(22, dst, NULL);
+			add_pending_item(211, g_path_get_basename(dst), NULL);
 		}
 		g_free(putdir);
 	}
