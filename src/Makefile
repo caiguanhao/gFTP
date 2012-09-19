@@ -12,7 +12,7 @@ gFTP.so: gFTP.c
 	gcc -shared -Wall -fPIC -o "gFTP.so" "gFTP.c" `pkg-config libxml-2.0 --cflags --libs libcurl geany`
 
 clean:
-	rm gFTP.so
+	rm -f gFTP.so
 
 install: gFTP.so
 	sudo cp gFTP.so $(libdir)/geany/gFTP.so

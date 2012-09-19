@@ -112,6 +112,7 @@ static struct
 	GtkWidget *showhiddenfiles;
 	GtkWidget *enable_hosts;
 	GtkWidget *confirm_delete;
+	GtkWidget *default_local_dir;
 	GtkWidget *decrypt_nppftp;
 	GtkWidget *import_nppftp;
 	GtkWidget *import_filezilla;
@@ -161,6 +162,7 @@ static struct
 	gboolean enable_hosts;
 	gboolean confirm_delete;
 	gchar *download_path;
+	gchar *default_local_dir;
 } current_settings;
 
 static struct 
