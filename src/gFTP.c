@@ -139,6 +139,21 @@ static int ftp_log(CURL *handle, curl_infotype type, gchar *data, size_t size, v
 	if (!g_utf8_validate(firstline, -1, NULL)) return 0;
 	if (hideregex && g_utf8_strlen(hideregex, -1)>0 && g_regex_match_simple(hideregex, firstline, G_REGEX_CASELESS, 0))
 		return 0;
+	if (g_regex_match_simple("^226-options", firstline, G_REGEX_CASELESS, 0)) return 0;
+	GRegex *regex;
+	GMatchInfo *match_info;
+	regex = g_regex_new("^226\\s(\\d+)\\smatches", G_REGEX_CASELESS, 0, NULL);
+	if (g_regex_match(regex, firstline, 0, &match_info)) {
+		gchar *matches = g_match_info_fetch(match_info, 1);
+		gint matches_i = g_ascii_strtoll(matches, NULL, 0) - 2; // minus two matches: . and ..
+		if (matches_i<1)
+			firstline = g_strdup("Directory is empty or doesn't exist.");
+		else
+			firstline = g_regex_replace(regex, firstline, -1, 0, g_strdup_printf("226 %d matches", matches_i), 0, NULL);
+		g_free(matches);
+	}
+	g_match_info_free(match_info);
+	g_regex_unref(regex);
 	gdk_threads_enter();
 	if (g_regex_match_simple("^PASS\\s(.*)$", firstline, 0, 0)) {
 		firstline = g_strdup_printf("PASS %s", g_strnfill((gsize)(g_utf8_strlen(firstline, -1)-5), '*'));
@@ -4306,8 +4321,8 @@ static void on_nppftp_password_buttons_clicked(GtkButton *button, gpointer p)
 {
 	_DefaultKey = (char *)malloc((KeySize+1)*sizeof(char));
 	strncpy(_DefaultKey, defaultString, KeySize);
-	gchar *masterpass = (gchar *)gtk_entry_get_text(GTK_ENTRY(nppftppw.mp_plain));
-	gchar *profilepass = (gchar *)gtk_entry_get_text(GTK_ENTRY(nppftppw.pp_plain));
+	gchar *masterpass = g_strdup(gtk_entry_get_text(GTK_ENTRY(nppftppw.mp_plain)));
+	gchar *profilepass = g_strdup(gtk_entry_get_text(GTK_ENTRY(nppftppw.pp_plain)));
 	if (g_utf8_strlen(masterpass, -1)==0) masterpass = NULL;
 	if (g_utf8_strlen(profilepass, -1)==0) profilepass = NULL;
 	gchar *result;
@@ -4692,8 +4707,10 @@ static void on_configure_response(GtkDialog *dialog, gint response, gpointer use
 		}
 		current_settings.enable_hosts = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.enable_hosts));
 		current_settings.confirm_delete = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.confirm_delete));
-		current_settings.default_local_dir = (gchar *)gtk_entry_get_text(GTK_ENTRY(pref.default_local_dir));
+		current_settings.default_local_dir = g_strdup(gtk_entry_get_text(GTK_ENTRY(pref.default_local_dir)));
 		if (!g_str_has_suffix(current_settings.default_local_dir, "/")) current_settings.default_local_dir = g_strconcat(current_settings.default_local_dir, "/", NULL);
+		gint c = gtk_combo_box_get_active(GTK_COMBO_BOX(pref.proxy_combo));
+		current_settings.current_proxy = c<=1?0:c-1;
 		save_settings();
 		save_profiles(1);
 	}
