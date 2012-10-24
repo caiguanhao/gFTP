@@ -12,10 +12,9 @@ _______\////////___\///____________________\///________\///______________
 
 About
 -----
-gFTP is a FTP plugin for Geany. Navigate the FTP server, download a file and 
-edit it in Geany. Then save the file and upload it automatically.
+gFTP is an FTP plugin for Geany on Linux.
 
-It works like NppFTP for Notepad++ on Windows and a little like FireFTP for Firefox.
+Similar to NppFTP for Notepad++ on Windows.
 
 
 Features
@@ -24,6 +23,7 @@ Features
  * Download -> Edit -> Save -> Upload.
  * SFTP/TLSv1/SSLv3 authentication.
  * Cache directory listings.
+ * Index and search files.
  * Proxy profiles.
  * Import NppFTP/FileZilla profiles.
 
@@ -55,34 +55,39 @@ Requirements
  * libgtk2.0-dev
  * libxml2-dev
 
-Testing this plugin in Geany
-----------------------------
-It's convenient to test building plugins in Geany. Here's my experience: 
 
- * Download & Install libcurl4-openssl-dev 7.21+ . e.g. for Debian users:
-   http://packages.debian.org/squeeze/libcurl4-openssl-dev
-   - sudo add-apt-repository "deb http://ftp.cn.debian.org/debian squeeze main"
-   - sudo apt-get update
-   - sudo apt-get install libcurl4-openssl-dev
-   
+Install (Ubuntu/Debian)
+-----------------------
+$ sudo add-apt-repository "deb http://ftp.cn.debian.org/debian squeeze main"
+$ sudo apt-get update
+$ sudo apt-get install gcc geany libgtk2.0-dev libcurl4-openssl-dev libxml2-dev
+$ cd src
+$ sudo make && make install && make clean
+
+
+Modify this plugin in Geany
+---------------------------
  * Open gFTP.c in Geany and click Build > Set Build Commands.
    In C commands (Build), type 
    gcc -shared -Wall -fPIC -o "%e.so" "%f" `pkg-config libxml-2.0 --cflags --libs libcurl geany`
    
-   Set the Extra Plugin Path (Edit > Preference > General) to where the 
+ * Set the Extra Plugin Path (Edit > Preference > General) to where the 
    new gFTP.so is built. To test, press F9 or click Build > Build.
    
-   To run a new Geany instance to test the newly generated plugin. It gets  
-   better if you set a global keyboard shortcut to run Geany. To get more info, 
-   run 'geany -v' in terminal instead.
-   
+ * Just run a new Geany instance to test it. To get more info, run
+   'geany -v' in terminal instead. To debug, install gdb and run 'gdb geany'
+   in terminal.
+
+
+Test FTP locally
+----------------
  * To test FTP or that with TLS/SSL authentication locally, use vsftpd.
    Here's a sample configuration for vsftpd:
    $ sudo mkdir /etc/vsftpd/
    $ cd /etc/vsftpd/
    $ sudo /usr/bin/openssl req -x509 -nodes -days 365 -newkey rsa:1024 -keyout vsftpd.pem -out vsftpd.pem
    Then, you may need to provide information for the certificate. After that, 
-   $ sudo geany /etc/vsftpd.conf
+   edit '/etc/vsftpd.conf':
    Uncomment several necessary lines, then append or modify these lines:
       ssl_enable=YES
       allow_anon_ssl=YES
@@ -94,7 +99,7 @@ It's convenient to test building plugins in Geany. Here's my experience:
       rsa_cert_file=/etc/vsftpd/vsftpd.pem
    If you want to set the port number, append this: listen_port=123 (e.g.).
    
- * To test SFTP locally, use OpenSSH.
+ * To test SFTP, use OpenSSH.
 
 
 Contact developers

@@ -1,9 +1,11 @@
-MACHINE := $(shell uname -m)
-ifeq ($(MACHINE), x86_64)
-libdir = /usr/lib/x86_64-linux-gnu
-endif
-ifeq ($(MACHINE), i686)
-libdir = /usr/lib
+ifeq ($(shell if test -d /usr/lib/geany; then echo true; else echo false; fi), true)
+    libdir = /usr/lib
+else
+    ifeq ($(shell if test -d /usr/lib/x86_64-linux-gnu/geany; then echo true; else echo false; fi), true)
+        libdir = /usr/lib/x86_64-linux-gnu
+    else
+        $(error You need to install Geany first.);
+    endif
 endif
 
 all: gFTP.so
@@ -18,4 +20,4 @@ install: gFTP.so
 	sudo cp gFTP.so $(libdir)/geany/gFTP.so
 
 uninstall:
-	sudo rm $(libdir)/geany/gFTP.so
+	sudo rm -f $(libdir)/geany/gFTP.so

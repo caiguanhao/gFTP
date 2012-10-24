@@ -89,6 +89,9 @@ static struct
 	GtkWidget *timeoffset_hr;
 	GtkWidget *timeoffset_min;
 	GtkWidget *load_on_startup;
+	GtkWidget *encoding;
+	gchar *lstenc;
+	gchar *cmdenc;
 	gulong toh_handler_id;
 	gulong tom_handler_id;
 	gulong los_handler_id;
@@ -185,6 +188,8 @@ static struct
 	gint timeoffset_hr;
 	gint timeoffset_min;
 	gboolean load_on_startup;
+	gchar *lstenc;
+	gchar *cmdenc;
 } current_profile;
 
 #define IS_CURRENT_PROFILE_SFTP g_strcmp0(current_profile.auth, "SFTP")==0
@@ -221,5 +226,6 @@ static gboolean is_folder_selected(GList *selected_items);
 static gchar *return_download_local_dir(gchar *name, gboolean allow_using_download_path);
 static gchar *local_or_tmp_directory();
 static gchar *quote_add_slash(gchar *src);
+static void update_encoding();
 
 #endif

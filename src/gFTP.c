@@ -477,6 +477,8 @@ static int to_list(const gchar *listdata, gchar *lsf)
 	gtk_tree_model_get(GTK_TREE_MODEL(file_store), &parent, FILEVIEW_COLUMN_DIR, &odata, -1);
 	if (g_utf8_strlen(lsf, -1)>0 && g_strcmp0(lsf, "./")!=0 && g_strcmp0(lsf, odata)!=0) return 2;
 	odata = g_strdup_printf("%s", listdata);
+	if (!g_utf8_validate(odata, -1, NULL) && current_profile.lstenc && g_strcmp0(current_profile.lstenc, "UTF-8")!=0) 
+		odata = encodings_convert_to_utf8_from_charset(odata, -1, current_profile.lstenc, TRUE);
 	gchar *pch;
 	pch = strtok(odata, "\r\n");
 	struct ftpparse ftp;
@@ -1898,13 +1900,8 @@ static void *get_dir_listing(gpointer p)
 			g_mkdir_with_parents(tmp_lst_file, 0777);
 			tmp_lst_file = g_strconcat(tmp_lst_file, "/", g_compute_checksum_for_string(G_CHECKSUM_SHA1, listing->str, -1), NULL);
 			g_file_set_contents(tmp_lst_file, listing->str, -1, NULL);
-			if (g_regex_match_simple("<(.|\n)*?>", listing->str, 0, 0) && dialogs_show_question("It seems that it was an HTML document. Open it with default application?")) {
-				GError* error = NULL;
-				gchar *argv[] = {"xdg-open", tmp_lst_file, NULL};
-				g_spawn_async(NULL, argv, NULL, G_SPAWN_SEARCH_PATH, NULL, NULL, NULL, &error);
-			} else {
-				document_open_file(tmp_lst_file, FALSE, NULL, NULL);
-			}
+			log_new_str(COLOR_RED, "Error reading list: you may be using an incorrect encoding type or proxy. Details:");
+			log_new_str(COLOR_RED, tmp_lst_file);
 			g_free(tmp_lst_file);
 			gdk_threads_leave();
 		}
@@ -1997,6 +1994,8 @@ static void execute()
 		if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(pending_store), &current_pending)) {
 			gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 
 			4, &remote, 5, &local, 6, &type, -1);
+			if (current_profile.cmdenc && g_strcmp0(current_profile.cmdenc, "UTF-8")!=0)
+				remote = g_convert(remote, -1, current_profile.cmdenc, "UTF-8", NULL, NULL, NULL);
 			switch (type) {
 				case 0: {
 					GList *ul = NULL;
@@ -2285,7 +2284,7 @@ static GtkWidget *create_popup_menu(void)
 	item = gtk_menu_item_new_with_mnemonic("_Advanced...");
 	gtk_container_add(GTK_CONTAINER(menu), item);
 	
-	submenu = gtk_menu_new ();
+	submenu = gtk_menu_new();
 	gtk_menu_item_set_submenu(GTK_MENU_ITEM(item), submenu);
 	
 	item = gtk_menu_item_new_with_mnemonic("_1. Download all files in this folder");
@@ -2483,6 +2482,8 @@ static void load_profiles(gint type)
 					11, utils_get_setting_integer(profiles, all_profiles[i], "timeoffset_hr", 0), 
 					12, utils_get_setting_integer(profiles, all_profiles[i], "timeoffset_min", 0), 
 					13, b_load_on_startup>0?FALSE:a_load_on_startup, 
+					14, utils_get_setting_string(profiles, all_profiles[i], "lstenc", "UTF-8"), 
+					15, utils_get_setting_string(profiles, all_profiles[i], "cmdenc", "UTF-8"), 
 					-1);
 				}
 				g_free(name);
@@ -2508,6 +2509,8 @@ static void load_profiles(gint type)
 			current_profile.timeoffset_hr = utils_get_setting_integer(profiles, all_profiles[i], "timeoffset_hr", 0);
 			current_profile.timeoffset_min = utils_get_setting_integer(profiles, all_profiles[i], "timeoffset_min", 0);
 			current_profile.load_on_startup = utils_get_setting_boolean(profiles, all_profiles[i], "load_on_startup", FALSE);
+			current_profile.lstenc = utils_get_setting_string(profiles, all_profiles[i], "lstenc", "UTF-8");
+			current_profile.cmdenc = utils_get_setting_string(profiles, all_profiles[i], "cmdenc", "UTF-8");
 			break;
 		}
 		case 3:{ //temp load
@@ -2525,6 +2528,8 @@ static void load_profiles(gint type)
 			current_profile.timeoffset_hr = 0;
 			current_profile.timeoffset_min = 0;
 			current_profile.load_on_startup = FALSE;
+			current_profile.lstenc = g_strdup(pref.lstenc);
+			current_profile.cmdenc = g_strdup(pref.cmdenc);
 			break;
 		}
 	}
@@ -2577,6 +2582,8 @@ static void save_profiles(gint type)
 			gint timeoffset_hr = 0;
 			gint timeoffset_min = 0;
 			gboolean load_on_startup = FALSE;
+			gchar *lstenc = NULL;
+			gchar *cmdenc = NULL;
 			while (valid) {
 				gtk_tree_model_get(GTK_TREE_MODEL(pref.store), &iter, 
 				0, &name, 
@@ -2593,6 +2600,8 @@ static void save_profiles(gint type)
 				11, &timeoffset_hr, 
 				12, &timeoffset_min, 
 				13, &load_on_startup, 
+				14, &lstenc, 
+				15, &cmdenc, 
 				-1);
 				name = g_strstrip(name);
 				host = g_strstrip(host);
@@ -2607,8 +2616,10 @@ static void save_profiles(gint type)
 					prefix = g_strstrip(prefix);
 					auth = g_strstrip(auth);
 					privatekey = g_strstrip(privatekey);
+					lstenc = g_strstrip(lstenc);
+					cmdenc = g_strstrip(cmdenc);
 					unique_id = g_strconcat(name, "\n", host, "\n", port, "\n", login, "\n", 
-					password, "\n", remote, "\n", local, "\n", webhost, "\n", prefix, "\n", auth, "\n", privatekey, g_strdup_printf("\n%d\n%d\n%d", timeoffset_hr, timeoffset_min, load_on_startup), NULL);
+					password, "\n", remote, "\n", local, "\n", webhost, "\n", prefix, "\n", auth, "\n", privatekey, g_strdup_printf("\n%d\n%d\n%d", timeoffset_hr, timeoffset_min, load_on_startup), "\n", lstenc, "\n", cmdenc, NULL);
 					unique_id = g_compute_checksum_for_string(G_CHECKSUM_MD5, unique_id, g_utf8_strlen(unique_id, -1));
 					g_key_file_set_string(profiles, unique_id, "name", name);
 					g_key_file_set_string(profiles, unique_id, "host", host);
@@ -2624,6 +2635,8 @@ static void save_profiles(gint type)
 					g_key_file_set_integer(profiles, unique_id, "timeoffset_hr", timeoffset_hr);
 					g_key_file_set_integer(profiles, unique_id, "timeoffset_min", timeoffset_min);
 					g_key_file_set_boolean(profiles, unique_id, "load_on_startup", load_on_startup);
+					g_key_file_set_string(profiles, unique_id, "lstenc", lstenc);
+					g_key_file_set_string(profiles, unique_id, "cmdenc", cmdenc);
 					g_free(unique_id);
 					g_free(port);
 					g_free(login);
@@ -2634,6 +2647,8 @@ static void save_profiles(gint type)
 					g_free(prefix);
 					g_free(auth);
 					g_free(privatekey);
+					g_free(lstenc);
+					g_free(cmdenc);
 				}
 				g_free(name);
 				g_free(host);
@@ -2659,6 +2674,8 @@ static void save_profiles(gint type)
 			g_key_file_set_integer(profiles, all_profiles[i], "timeoffset_hr", current_profile.timeoffset_hr);
 			g_key_file_set_integer(profiles, all_profiles[i], "timeoffset_min", current_profile.timeoffset_min);
 			g_key_file_set_boolean(profiles, all_profiles[i], "load_on_startup", current_profile.load_on_startup);
+			g_key_file_set_string(profiles, all_profiles[i], "lstenc", current_profile.lstenc);
+			g_key_file_set_string(profiles, all_profiles[i], "cmdenc", current_profile.cmdenc);
 			break;
 		}
 	}
@@ -3751,6 +3768,8 @@ static void *on_host_login_password_changed(GtkWidget *widget, GdkEventKey *even
 	11, (gint)gtk_spin_button_get_value(GTK_SPIN_BUTTON(pref.timeoffset_hr)), 
 	12, (gint)gtk_spin_button_get_value(GTK_SPIN_BUTTON(pref.timeoffset_min)), 
 	13, gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.load_on_startup)), 
+	14, pref.lstenc, 
+	15, pref.cmdenc, 
 	-1);
 	gtk_combo_box_set_active_iter(GTK_COMBO_BOX(pref.combo), &pref.iter_store_new);
 	return FALSE;
@@ -3911,6 +3930,8 @@ static void on_edit_profiles_changed(void)
 	gint timeoffset_hr = 0;
 	gint timeoffset_min = 0;
 	gboolean load_on_startup = FALSE;
+	gchar *lstenc = g_strdup_printf("%s", "UTF-8");
+	gchar *cmdenc = g_strdup_printf("%s", "UTF-8");
 	if (is_edit_profiles_selected_nth_item(&iter, "0")) {
 		g_object_set_data(G_OBJECT(pref.name), "name-edited", (gpointer)FALSE);
 		focus_widget(pref.host);
@@ -3931,6 +3952,8 @@ static void on_edit_profiles_changed(void)
 			11, &timeoffset_hr, 
 			12, &timeoffset_min, 
 			13, &load_on_startup, 
+			14, &lstenc, 
+			15, &cmdenc, 
 			-1);
 		}
 		if (g_strcmp0(name, host)!=0)
@@ -3959,6 +3982,9 @@ static void on_edit_profiles_changed(void)
 	check_private_key_browse_sensitive();
 	g_signal_handler_unblock(pref.auth, pref.auth_handler_id);
 	if (privatekey) gtk_entry_set_text(GTK_ENTRY(pref.privatekey), privatekey);
+	if (lstenc) pref.lstenc = g_strdup(lstenc);
+	if (cmdenc) pref.cmdenc = g_strdup(cmdenc);
+	update_encoding();
 	g_free(name);
 	g_free(host);
 	g_free(port);
@@ -3970,6 +3996,8 @@ static void on_edit_profiles_changed(void)
 	g_free(prefix);
 	g_free(auth);
 	g_free(privatekey);
+	g_free(lstenc);
+	g_free(cmdenc);
 	
 	is_select_profiles_use_anonymous(&iter);
 	check_delete_button_sensitive(&iter);
@@ -4714,6 +4742,9 @@ static void on_configure_response(GtkDialog *dialog, gint response, gpointer use
 		save_settings();
 		save_profiles(1);
 	}
+	pref.lstenc = NULL;
+	pref.cmdenc = NULL;
+	if (current_profile.index>-1) load_profiles(2);
 }
 
 static void on_window_drag_data_received(GtkWidget *widget, GdkDragContext *drag_context, gint x, gint y, GtkSelectionData *data, guint target_type, guint event_time, gpointer user_data)
@@ -4759,9 +4790,152 @@ static void on_window_drag_data_received(GtkWidget *widget, GdkDragContext *drag
 	gtk_drag_finish(drag_context, success, FALSE, event_time);
 }
 
+static void on_change_encoding_response(GtkDialog *dialog, gint response_id, gpointer treeview, gint type)
+{
+	if (response_id == GTK_RESPONSE_OK) {
+		GtkTreeModel *model = GTK_TREE_MODEL(search_store);
+		GtkTreeSelection *treesel;
+		GList *list;
+		treesel = gtk_tree_view_get_selection(GTK_TREE_VIEW(treeview));
+		list = gtk_tree_selection_get_selected_rows(treesel, &model);
+		if (is_single_selection(treesel)) {
+			GtkTreeIter iter;
+			gtk_tree_model_get_iter(model, &iter, list->data);
+			gchar *encoding;
+			gtk_tree_model_get(model, &iter, 0, &encoding, -1);
+			if (type==2)
+				pref.cmdenc = g_strdup(encoding);
+			else
+				pref.lstenc = g_strdup(encoding);
+			update_encoding();
+			on_host_login_password_changed(NULL, NULL, NULL);
+		}
+		g_list_foreach(list, (GFunc)gtk_tree_path_free, NULL);
+		g_list_free(list);
+	}
+}
+
+static void on_change_encoding_response2(GtkDialog *dialog, gint response_id, gpointer treeview)
+{
+	on_change_encoding_response(dialog, response_id, treeview, 2);
+}
+
+static gboolean change_encoding_button_press(GtkWidget *widget, GdkEventButton *event, gpointer dialog, gint type)
+{
+	if (event->button == 1 && event->type == GDK_2BUTTON_PRESS) {
+		gtk_dialog_response(dialog, GTK_RESPONSE_CLOSE);
+		on_change_encoding_response(NULL, GTK_RESPONSE_OK, widget, type);
+		return TRUE;
+	}
+	return FALSE;
+}
+
+static gboolean change_encoding_button_press2(GtkWidget *widget, GdkEventButton *event, gpointer dialog, gint type)
+{
+	return change_encoding_button_press(widget, event, dialog, 2);
+}
+
+static void update_encoding()
+{
+	if (!pref.lstenc) pref.lstenc = g_strdup("UTF-8");
+	if (!pref.cmdenc) pref.cmdenc = g_strdup("UTF-8");
+	gtk_label_set_markup(GTK_LABEL(pref.encoding), g_markup_printf_escaped("for listings: <a href=\"chlstenc\">%s</a>, commands: <a href=\"chcmdenc\">%s</a>", pref.lstenc, pref.cmdenc));
+}
+
+static void change_encoding(gint type)
+{
+	GError *error = NULL;
+	gchar *result = NULL;
+	gchar **argv;
+	gchar **sets;
+	g_shell_parse_argv("iconv -l", NULL, &argv, NULL);
+	if (g_spawn_sync("/usr/bin", argv, NULL, G_SPAWN_LEAVE_DESCRIPTORS_OPEN, NULL, NULL, &result, NULL, NULL, &error)) {
+		sets = g_regex_split_simple("//\n|/\n", result, 0, 0);
+	} else {
+		dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Error loading '/usr/bin/iconv' .");
+		return;
+	}
+	
+	GtkWidget *dialog, *vbox;
+	gchar *title;
+	if (type==1) title = "Change encoding for listings";
+	if (type==2) title = "Change encoding for commands";
+	dialog = gtk_dialog_new_with_buttons(title, GTK_WINDOW(geany->main_widgets->window),
+		GTK_DIALOG_DESTROY_WITH_PARENT, 
+		GTK_STOCK_CANCEL, GTK_RESPONSE_CANCEL, 
+		GTK_STOCK_OK, GTK_RESPONSE_OK, 
+		NULL);
+	vbox = ui_dialog_vbox_new(GTK_DIALOG(dialog));
+	gtk_box_set_spacing(GTK_BOX(vbox), 6);
+	
+	GtkWidget *widget;
+	
+	widget = gtk_tree_view_new();
+	PangoFontDescription *pfd = pango_font_description_new();
+	pango_font_description_set_family(pfd, "monospace");
+	gtk_widget_modify_font(widget, pfd);
+	gtk_tree_view_set_show_expanders(GTK_TREE_VIEW(widget), FALSE);
+	gtk_widget_set_size_request(widget, 300, 270);
+	
+	search_store = gtk_tree_store_new(1, G_TYPE_STRING);
+	gtk_tree_view_set_model(GTK_TREE_VIEW(widget), GTK_TREE_MODEL(search_store));
+	g_object_unref(search_store);
+	
+	GtkCellRenderer *text_renderer;
+	GtkTreeViewColumn *column;
+	column = gtk_tree_view_column_new();
+	text_renderer = gtk_cell_renderer_text_new();
+	gtk_tree_view_column_pack_start(column, text_renderer, TRUE);
+	gtk_tree_view_column_set_attributes(column, text_renderer, "text", 0, NULL);
+	gtk_tree_view_append_column(GTK_TREE_VIEW(widget), column);
+	gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(widget), FALSE);
+	gtk_tree_view_set_tooltip_column(GTK_TREE_VIEW(widget), 0);
+	
+	gint i;
+	GtkTreeIter iter, iter2;
+	gchar *strcmp = NULL;
+	if (type==1 && pref.lstenc) strcmp = g_strdup(pref.lstenc);
+	if (type==2 && pref.cmdenc) strcmp = g_strdup(pref.cmdenc);
+	
+	for (i = 0; i < g_strv_length(sets); i++) {
+		if (g_utf8_strlen(sets[i], -1)>0) {
+			gtk_tree_store_append(search_store, &iter, NULL);
+			gtk_tree_store_set(search_store, &iter, 0, sets[i], -1);
+			if (g_strcmp0(sets[i], strcmp)==0) {
+				iter2 = *gtk_tree_iter_copy(&iter);
+			}
+		}
+	}
+	
+	GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(search_store), &iter2);
+	gtk_tree_view_set_cursor(GTK_TREE_VIEW(widget), path, NULL, FALSE);
+	gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(widget), path, NULL, FALSE, 0, 0);
+	gtk_tree_path_free(path);
+	
+	GtkWidget *widget2 = gtk_scrolled_window_new(NULL, NULL);
+	gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(widget2), GTK_SHADOW_IN);
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(widget2), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+	gtk_container_add(GTK_CONTAINER(widget2), widget);
+	
+	gtk_box_pack_start(GTK_BOX(vbox), widget2, TRUE, TRUE, 0);
+	
+	if (type==1) {
+		g_signal_connect(dialog, "response", G_CALLBACK(on_change_encoding_response), widget);
+		g_signal_connect(widget, "button-press-event", G_CALLBACK(change_encoding_button_press), dialog);
+	}
+	if (type==2) {
+		g_signal_connect(dialog, "response", G_CALLBACK(on_change_encoding_response2), widget);
+		g_signal_connect(widget, "button-press-event", G_CALLBACK(change_encoding_button_press2), dialog);
+	}
+	
+	gtk_widget_show_all(dialog);
+	gtk_dialog_run(GTK_DIALOG(dialog));
+	gtk_widget_destroy(dialog);
+}
+
 static gboolean link_actions (GtkLabel *label, gchar *uri, gpointer user_data)
 {
-	if (g_strcmp0(uri,"browse_default_local_dir")==0) {
+	if (g_strcmp0(uri, "browse_default_local_dir")==0) {
 		gchar *path;
 		path = g_strdup_printf("%s", gtk_entry_get_text(GTK_ENTRY(pref.default_local_dir)));
 		path = run_file_chooser("Browse default local directory", GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER, path);
@@ -4769,6 +4943,10 @@ static gboolean link_actions (GtkLabel *label, gchar *uri, gpointer user_data)
 			if (!g_str_has_suffix(path, "/")) path = g_strdup_printf("%s/", path);
 			gtk_entry_set_text(GTK_ENTRY(pref.default_local_dir), path);
 		}
+	} else if (g_strcmp0(uri, "chlstenc")==0) {
+		change_encoding(1);
+	} else if (g_strcmp0(uri, "chcmdenc")==0) {
+		change_encoding(2);
 	}
 	return TRUE;
 }
@@ -5103,7 +5281,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	notebook = gtk_notebook_new();
 	
 	GtkListStore *store;
-	store = gtk_list_store_new(14, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN);
+	store = gtk_list_store_new(16, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN, G_TYPE_STRING, G_TYPE_STRING);
 	GtkTreeIter iter;
 	gtk_list_store_append(store, &iter);
 	gtk_list_store_set(store, &iter, 0, "New profile...", -1);
@@ -5124,7 +5302,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	
 	load_profiles(1);
 	
-	table = gtk_table_new(16, 4, FALSE);
+	table = gtk_table_new(17, 4, FALSE);
 	
 	gtk_widget_set_size_request(widget, 250, -1);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
@@ -5313,12 +5491,25 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_widget_show_all(hbox);
 	gtk_table_attach(GTK_TABLE(table), hbox, 1, 4, 14, 15, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	
-	widget = gtk_label_new("Misc.");
+	widget = gtk_label_new("Encoding");
 	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
 	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 15, 16, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	widget = gtk_label_new("");
+	gtk_misc_set_alignment(GTK_MISC(widget), 0, 0.5);
+	gtk_label_set_use_markup(GTK_LABEL(widget), TRUE);
+	gtk_label_set_track_visited_links(GTK_LABEL(widget), FALSE);
+	gtk_label_set_ellipsize(GTK_LABEL(widget), PANGO_ELLIPSIZE_MIDDLE);
+	g_signal_connect(G_OBJECT(widget), "activate-link", G_CALLBACK(link_actions), NULL);
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 4, 15, 16, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	pref.encoding = widget;
+	update_encoding();
+	
+	widget = gtk_label_new("Misc.");
+	gtk_misc_set_alignment(GTK_MISC(widget), 1, 0.5);
+	gtk_table_attach(GTK_TABLE(table), widget, 0, 1, 16, 17, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	widget = gtk_check_button_new_with_label("Connect to this profile on startup");
 	pref.los_handler_id = g_signal_connect(widget, "toggled", G_CALLBACK(on_load_on_startup_changed), NULL);
-	gtk_table_attach(GTK_TABLE(table), widget, 1, 4, 15, 16, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
+	gtk_table_attach(GTK_TABLE(table), widget, 1, 4, 16, 17, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	pref.load_on_startup = widget;
 	
 	hbox = gtk_hbox_new(FALSE, 6);
