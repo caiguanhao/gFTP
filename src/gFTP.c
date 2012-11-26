@@ -28,6 +28,15 @@ static gchar *format_size(goffset size)
 #endif
 }
 
+static GThread* new_thread(const gchar *name, gpointer func, gpointer data, gpointer joinable, gpointer error)
+{
+#if GLIB_CHECK_VERSION(2, 32, 0)
+	return g_thread_try_new(name, func, data, error);
+#else
+	return g_thread_create(func, data, joinable, error);
+#endif
+}
+
 static void try_another_username_password(gchar *raw)
 {
 	gdk_threads_enter();
@@ -1020,7 +1029,7 @@ static void *to_search_file_name(GtkButton *button, gpointer entry)
 {
 	gtk_widget_set_sensitive(search.search, FALSE);
 	gtk_button_set_label(GTK_BUTTON(search.search), "Searching...");
-	g_thread_create(&search_file_name, entry, FALSE, NULL);
+	new_thread("search.file.name", &search_file_name, entry, FALSE, NULL);
 	return NULL;
 }
 
@@ -1608,7 +1617,11 @@ static void *get_server_time(gpointer p)
 
 static void *get_dir_listing(gpointer p)
 {
+	#if GLIB_CHECK_VERSION(2, 32, 0)
+	g_mutex_lock(&mutex);
+	#else
 	g_mutex_lock(mutex);
+	#endif
 	GList *ls = (GList *)p;
 	GString *lsfrom = g_string_new((gchar *)g_list_nth_data(ls, 0));
 	GString *lsto = g_string_new((gchar *)g_list_nth_data(ls, 1));
@@ -1913,7 +1926,11 @@ static void *get_dir_listing(gpointer p)
 	ui_progress_bar_stop();
 	execute_end(gtype);
 	gdk_threads_leave();
+	#if GLIB_CHECK_VERSION(2, 32, 0)
+	g_mutex_unlock(&mutex);
+	#else
 	g_mutex_unlock(mutex);
+	#endif
 	g_thread_exit(NULL);
 	return NULL;
 }
@@ -1963,7 +1980,7 @@ static void *to_download_file(GList *p)
 {
 	curl_easy_reset(curl);
 	gtk_widget_show(geany->main_widgets->progressbar);
-	g_thread_create(&download_file, p, FALSE, NULL);
+	new_thread("download.file", &download_file, p, FALSE, NULL);
 	return NULL;
 }
 
@@ -1971,7 +1988,7 @@ static void *to_upload_file(GList *p)
 {
 	curl_easy_reset(curl);
 	gtk_widget_show(geany->main_widgets->progressbar);
-	g_thread_create(&upload_file, p, FALSE, NULL);
+	new_thread("upload.file", &upload_file, p, FALSE, NULL);
 	return NULL;
 }
 
@@ -1979,7 +1996,7 @@ static void *to_get_dir_listing(GList *p)
 {
 	curl_easy_reset(curl);
 	ui_progress_bar_start("Please wait...");
-	g_thread_create(&get_dir_listing, p, FALSE, NULL);
+	new_thread("get.dir.listings", &get_dir_listing, p, FALSE, NULL);
 	return NULL;
 }
 
@@ -4312,7 +4329,7 @@ static void on_get_server_time_clicked(GtkButton *button, gpointer p)
 	
 	pref.curl_initialized = !(!curl);
 	if (!curl) curl = curl_easy_init();
-	g_thread_create(&get_server_time, dialog, FALSE, NULL);
+	new_thread("get.server.time", &get_server_time, dialog, FALSE, NULL);
 
 	gtk_box_pack_start(GTK_BOX(vbox), widget, FALSE, FALSE, 0);
 	
@@ -5211,13 +5228,19 @@ void plugin_init(GeanyData *data)
 {
 	curl_global_init(CURL_GLOBAL_ALL);
 	
+	#if !GLIB_CHECK_VERSION(2, 32, 0)
 	if (!g_thread_supported()) g_thread_init(NULL);
+	#endif
 	
 	gdk_threads_init();
 	
 	gdk_threads_enter();
 	
+	#if GLIB_CHECK_VERSION(2, 32, 0)
+	g_mutex_init(&mutex);
+	#else
 	mutex = g_mutex_new();
+	#endif
 	
 	box = gtk_vbox_new(FALSE, 0);
 	

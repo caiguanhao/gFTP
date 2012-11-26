@@ -33,7 +33,11 @@ static gint always_show_hidden_files = 0;
 static gint page_number = 0, config_page_number = 0;
 static gint last_file_view_y = 0;
 static GtkTreePath *drag_begin_selected;
+#if GLIB_CHECK_VERSION(2, 32, 0)
+static GMutex mutex;
+#else
 static GMutex *mutex;
+#endif
 
 #ifndef BASE64ENCODE_TIMES
 #define BASE64ENCODE_TIMES 8
