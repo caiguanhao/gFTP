@@ -67,6 +67,10 @@ $ sudo make && make install && make clean
 Note: if you want to have multiple instances, re-run the last command:
 $ sudo make && make install && make clean
 
+Note: SFTP protocol is not supported in libcurl3 Ubuntu packages, therefore, you
+may receive the error 'Protocol sftp not supported or disabled in libcurl', it is
+recommended you install libcurl3 from Debian packages (see troubleshoot below).
+
 
 Modify this plugin in Geany
 ---------------------------
@@ -103,6 +107,21 @@ Test FTP locally
    If you want to set the port number, append this: listen_port=123 (e.g.).
    
  * To test SFTP, use OpenSSH.
+
+
+Troubleshoot
+------------
+ * Error 'Protocol sftp not supported or disabled in libcurl'.
+   $ sudo add-apt-repository "deb http://ftp.cn.debian.org/debian wheezy main"
+   $ sudo apt-get update
+   $ sudo apt-cache policy libcurl3
+   if the candidate is from from http://ftp.cn.debian.org/... , you can run:
+      $ sudo apt-get install libcurl3
+   if NOT, you can install the unstable version:
+      -> $ sudo add-apt-repository "deb http://ftp.cn.debian.org/debian sid main"
+      -> $ sudo apt-get update && sudo apt-get install libcurl3
+   or choose to install, for example, the 7.26.0-1 version from the version table:
+      -> $ sudo apt-get install libcurl3=7.26.0-1
 
 
 Contact developers

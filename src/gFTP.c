@@ -1775,6 +1775,11 @@ static void *get_dir_listing(gpointer p)
 					curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "LIST -a");
 			}
 			code = curl_easy_perform(curl);
+			if (code==1 && IS_CURRENT_PROFILE_SFTP) { // CURLE_UNSUPPORTED_PROTOCOL
+				gdk_threads_enter();
+				dialogs_show_msgbox(GTK_MESSAGE_INFO, "You may need to upgrade libcurl3 with SFTP protocol (protocol::sftp) supported.\n\nFor Debian/Ubuntu users, go to http://packages.debian.org/sid/libcurl3 .");
+				gdk_threads_leave();
+			}
 			if (create_file_mode && code==79) code=0; //hide pointless error
 			if (code!=0) {
 				gdk_threads_enter();
