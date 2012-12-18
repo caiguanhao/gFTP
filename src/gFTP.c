@@ -13,7 +13,7 @@ GeanyPlugin *geany_plugin;
 GeanyData *geany_data;
 GeanyFunctions *geany_functions;
 
-PLUGIN_VERSION_CHECK(211)
+PLUGIN_VERSION_CHECK(201) // at least Geany 0.20
 
 PLUGIN_SET_INFO("gFTP", "FTP Plugin for Geany.", "1.0", "Cai Guanhao <caiguanhao@gmail.com>");
 
@@ -33,7 +33,7 @@ static GThread* new_thread(const gchar *name, gpointer func, gpointer data, gpoi
 #if GLIB_CHECK_VERSION(2, 32, 0)
 	return g_thread_try_new(name, func, data, error);
 #else
-	return g_thread_create(func, data, joinable, error);
+	return g_thread_create(func, data, GPOINTER_TO_INT(joinable), error);
 #endif
 }
 
@@ -256,11 +256,14 @@ static gchar *find_host (gchar *src)
 
 static gboolean current_pending_progress(guint interval, GSourceFunc function, gpointer data)
 {
+	if (pending_store==NULL) return FALSE;
 	if (gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
 		gint pulse;
 		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 3, &pulse, -1);
 		if (pulse>=0) {
+			gdk_threads_enter();
 			gtk_list_store_set(pending_store, &current_pending, 3, pulse + 1, -1);
+			gdk_threads_leave();
 		}
 	}
 	return TRUE;
@@ -5793,4 +5796,5 @@ void plugin_cleanup(void)
 	g_free(hosts_file);
 	g_free(tmp_dir);
 	g_strfreev(all_profiles);
+	gtk_widget_destroy(box);
 }

@@ -62,14 +62,21 @@ $ sudo add-apt-repository "deb http://ftp.cn.debian.org/debian squeeze main"
 $ sudo apt-get update
 $ sudo apt-get install gcc geany libgtk2.0-dev libcurl4-openssl-dev libxml2-dev
 $ cd src
-$ sudo make && make install && make clean
+$ make && make install && make clean
 
 Note: if you want to have multiple instances, re-run the last command:
-$ sudo make && make install && make clean
+$ make && make install && make clean
 
 Note: SFTP protocol is not supported in libcurl3 Ubuntu packages, therefore, you
 may receive the error 'Protocol sftp not supported or disabled in libcurl', it is
 recommended you install libcurl3 from Debian packages (see troubleshoot below).
+
+
+Install (Fedora)
+----------------
+$ sudo yum -y install gcc geany-devel libxml2-devel libcurl-devel openssl-devel
+$ cd src
+$ make && make install && make clean
 
 
 Modify this plugin in Geany

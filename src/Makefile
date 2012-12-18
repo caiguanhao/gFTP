@@ -1,18 +1,14 @@
-ifeq ($(shell if test -d /usr/lib/geany; then echo true; else echo false; fi), true)
-    libdir = /usr/lib
-else
-    ifeq ($(shell if test -d /usr/lib/x86_64-linux-gnu/geany; then echo true; else echo false; fi), true)
-        libdir = /usr/lib/x86_64-linux-gnu
-    else
-        $(error You need to install Geany first.);
-    endif
+libdir = $(shell geany --print-prefix|sed -n 3p)/geany
+
+ifeq ($(shell if test -d $(libdir); then echo true; else echo false; fi), false)
+$(error You need to install Geany first);
 endif
 
 filename = gFTP.so
 
 ifeq ($(MAKECMDGOALS),)
-	ifeq ($(shell if test -f $(libdir)/geany/gFTP.so; then echo true; else echo false; fi), true)
-		ifeq ($(shell read -p "'$(libdir)/geany/gFTP.so' already exists. \
+	ifeq ($(shell if test -f $(libdir)/$(filename); then echo true; else echo false; fi), true)
+		ifeq ($(shell read -p "'$(libdir)/$(filename)' already exists. \
 		Do you want to create a new instance? [y/N] " REPLY; echo $$REPLY), y)
 			filename = gFTP-$(shell date +%Y%m%d%H%M%S).so
 		endif
@@ -28,8 +24,8 @@ clean:
 	rm -f gFTP*.so
 
 install:
-	sudo cp gFTP*.so $(libdir)/geany/
-	sudo chmod 644 $(libdir)/geany/gFTP*.so
+	sudo cp gFTP*.so $(libdir)
+	sudo chmod 644 $(libdir)/gFTP*.so
 
 uninstall:
-	sudo rm -f $(libdir)/geany/gFTP*.so
+	sudo rm -f $(libdir)/gFTP*.so
