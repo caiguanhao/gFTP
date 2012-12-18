@@ -3834,6 +3834,67 @@ static void *on_name_edited(GtkWidget *widget, GdkEventKey *event, GtkDialog *di
 	return on_host_login_password_changed(NULL, NULL, NULL);
 }
 
+static void on_conf_host_focus_out(GtkWidget *widget, GdkEvent *event, gpointer user_data)
+{
+	// parse FTP URL
+	gchar *val = g_strdup(gtk_entry_get_text(GTK_ENTRY(widget?widget:pref.host)));
+	if (g_utf8_strlen(val, -1)==0) return;
+	if (g_regex_match_simple("^ftp://", val, G_REGEX_CASELESS, 0)) {
+		gtk_combo_box_set_active(GTK_COMBO_BOX(pref.auth), to_auth_type("FTP"));
+	} else if (g_regex_match_simple("^sftp://", val, G_REGEX_CASELESS, 0)) {
+		gtk_combo_box_set_active(GTK_COMBO_BOX(pref.auth), to_auth_type("SFTP"));
+	} else if (g_regex_match_simple("^ftps://", val, G_REGEX_CASELESS, 0)) {
+		gtk_combo_box_set_active(GTK_COMBO_BOX(pref.auth), to_auth_type("SSLv3 (FTPS)"));
+	}
+	GRegex *regex;
+	GMatchInfo *match_info;
+	gchar **matches;
+	gchar *match;
+	
+	regex = g_regex_new("^s?ftps?://", G_REGEX_CASELESS, 0, NULL);
+	val = g_regex_replace(regex, val, -1, 0, "", 0, NULL);
+	
+	regex = g_regex_new("^(.+?)/(.*)$", 0, 0, NULL);
+	if (g_regex_match(regex, val, 0, &match_info)) {
+		matches = g_match_info_fetch_all(match_info);
+		if (g_utf8_strlen(matches[2], -1)>0)
+			gtk_entry_set_text(GTK_ENTRY(pref.remote), g_strdup_printf("/%s", matches[2]));
+		val = g_strdup(matches[1]);
+	}
+	regex = g_regex_new("^(.*):(\\d{1,5})$", 0, 0, NULL);
+	if (g_regex_match(regex, val, 0, &match_info)) {
+		matches = g_match_info_fetch_all(match_info);
+		gtk_entry_set_text(GTK_ENTRY(pref.port), matches[2]);
+		val = g_strdup(matches[1]);
+	}
+	regex = g_regex_new("^(.*)@(.*)$", 0, 0, NULL);
+	if (g_regex_match(regex, val, 0, &match_info)) {
+		matches = g_match_info_fetch_all(match_info);
+		match = g_strdup(matches[2]);
+		gtk_entry_set_text(GTK_ENTRY(pref.host), match);
+		
+		regex = g_regex_new("^(.*):(.*)$", 0, 0, NULL);
+		if (g_regex_match(regex, matches[1], 0, &match_info)) {
+			matches = g_match_info_fetch_all(match_info);
+			gtk_entry_set_text(GTK_ENTRY(pref.passwd), matches[2]);
+		}
+		
+		gtk_entry_set_text(GTK_ENTRY(pref.login), matches[1]);
+		if (g_object_get_data(G_OBJECT(pref.name), "name-edited")==FALSE)
+			gtk_entry_set_text(GTK_ENTRY(pref.name), g_strdup_printf("%s@%s", matches[1], match));
+	} else {
+		gtk_entry_set_text(GTK_ENTRY(pref.host), val);
+		if (g_object_get_data(G_OBJECT(pref.name), "name-edited")==FALSE)
+			gtk_entry_set_text(GTK_ENTRY(pref.name), val);
+	}
+	g_object_set_data(G_OBJECT(pref.name), "name-edited", (gpointer)TRUE);
+	
+	g_match_info_free(match_info);
+	g_regex_unref(regex);
+	
+	on_host_login_password_changed(NULL, NULL, NULL);
+}
+
 static void on_use_current_clicked(GtkButton *button, gpointer user_data)
 {
 	GtkTreePath *path;
@@ -4741,6 +4802,7 @@ static void on_configure_response(GtkDialog *dialog, gint response, gpointer use
 {
 	config_page_number = gtk_notebook_get_current_page(GTK_NOTEBOOK(pref.notebook));
 	if (response == GTK_RESPONSE_OK || response == GTK_RESPONSE_APPLY) {
+		on_conf_host_focus_out(NULL, NULL, NULL); //paste full url and then press enter to save
 		current_settings.autonav = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.autonav));
 		current_settings.autoreload = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.autoreload));
 		current_settings.cache = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(pref.cache));
@@ -5351,6 +5413,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_entry_set_max_length(GTK_ENTRY(widget), 255);
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_name_edited), dialog);
+	g_signal_connect(widget, "focus-out-event", G_CALLBACK(on_conf_host_focus_out), NULL);
 	pref.name = widget;
 	widget = gtk_button_new_with_mnemonic("_Organize...");
 	gtk_widget_set_tooltip_text(widget, "Organize profiles.");
@@ -5368,6 +5431,7 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_entry_set_max_length(GTK_ENTRY(widget), 255);
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 3, 4, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_host_login_password_changed), dialog);
+	g_signal_connect(widget, "focus-out-event", G_CALLBACK(on_conf_host_focus_out), NULL);
 	pref.host = widget;
 	
 	widget = gtk_label_new("Port");
