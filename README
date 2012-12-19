@@ -79,6 +79,12 @@ $ cd src
 $ make && make install && make clean
 
 
+Install (FreeBSD)
+-----------------
+$ cd src
+$ gmake && gmake install && gmake clean
+
+
 Modify this plugin in Geany
 ---------------------------
  * Open gFTP.c in Geany and click Build > Set Build Commands.
@@ -129,6 +135,16 @@ Troubleshoot
       -> $ sudo apt-get update && sudo apt-get install libcurl3
    or choose to install, for example, the 7.26.0-1 version from the version table:
       -> $ sudo apt-get install libcurl3=7.26.0-1
+   
+   Another option is to build from source. (http://curl.haxx.se/download.html)
+      $ curl -O http://curl.haxx.se/download/curl-7.28.1.tar.gz
+      $ tar xfvz curl-7.28.1.tar.gz
+      $ cd curl-7.28.1
+      $ ./configure --with-libssh2
+      $ make
+      $ sudo make install
+      $ make clean
+   Then rebuild gFTP.
 
 
 Contact developers

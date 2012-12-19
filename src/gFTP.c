@@ -2386,7 +2386,7 @@ static gchar *decrypt(gchar *src)
 	return src;
 }
 
-static gchar *encrypt(gchar *src)
+static gchar *encrypt_password(gchar *src)
 {
 	if (g_utf8_strlen(src, -1)>0) {
 		gchar *p1 = src;
@@ -2634,7 +2634,7 @@ static void save_profiles(gint type)
 					if (g_utf8_strlen(name, -1)==0) name = g_strdup(host);
 					port = g_strstrip(port);
 					login = g_strstrip(login);
-					password = encrypt(g_strstrip(password));
+					password = encrypt_password(g_strstrip(password));
 					remote = g_strstrip(remote);
 					local = g_strstrip(local);
 					webhost = g_strstrip(webhost);
@@ -2689,7 +2689,7 @@ static void save_profiles(gint type)
 			g_key_file_set_string(profiles, all_profiles[i], "host", current_profile.host);
 			g_key_file_set_string(profiles, all_profiles[i], "port", current_profile.port);
 			g_key_file_set_string(profiles, all_profiles[i], "login", current_profile.login);
-			g_key_file_set_string(profiles, all_profiles[i], "password", encrypt(current_profile.password));
+			g_key_file_set_string(profiles, all_profiles[i], "password", encrypt_password(current_profile.password));
 			g_key_file_set_string(profiles, all_profiles[i], "remote", current_profile.remote);
 			g_key_file_set_string(profiles, all_profiles[i], "local", current_profile.local);
 			g_key_file_set_string(profiles, all_profiles[i], "webhost", current_profile.webhost);

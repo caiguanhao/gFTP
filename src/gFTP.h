@@ -224,7 +224,7 @@ static gboolean focus_widget(gpointer p);
 static int to_auth_type(gchar *type);
 static int to_proxy_type(gchar *type);
 static gchar **parse_proxy_string(gchar *name);
-static gchar *encrypt(gchar *src);
+static gchar *encrypt_password(gchar *src);
 static gboolean is_single_selection(GtkTreeSelection *treesel);
 static gboolean is_folder_selected(GList *selected_items);
 static gchar *return_download_local_dir(gchar *name, gboolean allow_using_download_path);

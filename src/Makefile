@@ -1,3 +1,5 @@
+SUDO = $(shell command -v sudo 2>/dev/null)
+
 libdir = $(shell geany --print-prefix|sed -n 3p)/geany
 
 ifeq ($(shell if test -d $(libdir); then echo true; else echo false; fi), false)
@@ -24,8 +26,8 @@ clean:
 	rm -f gFTP*.so
 
 install:
-	sudo cp gFTP*.so $(libdir)
-	sudo chmod 644 $(libdir)/gFTP*.so
+	$(SUDO) cp gFTP*.so $(libdir)
+	$(SUDO) chmod 644 $(libdir)/gFTP*.so
 
 uninstall:
-	sudo rm -f $(libdir)/gFTP*.so
+	$(SUDO) rm -f $(libdir)/gFTP*.so
