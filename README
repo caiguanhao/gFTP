@@ -81,6 +81,8 @@ $ make && make install && make clean
 
 Install (FreeBSD)
 -----------------
+$ su -
+$ pkg_add -r geany gmake
 $ cd src
 $ gmake && gmake install && gmake clean
 
@@ -116,8 +118,12 @@ Test FTP locally
       ssl_tlsv1=YES
       ssl_sslv2=NO
       ssl_sslv3=NO
+      ssl_ciphers=HIGH
       rsa_cert_file=/etc/vsftpd/vsftpd.pem
+   Comment or remove 'rsa_private_key_file' option or set it the same as 'rsa_cert_file'.
    If you want to set the port number, append this: listen_port=123 (e.g.).
+   Restart service:
+   $ sudo service vsftpd restart
    
  * To test SFTP, use OpenSSH.
 

@@ -256,8 +256,7 @@ static gchar *find_host (gchar *src)
 
 static gboolean current_pending_progress(guint interval, GSourceFunc function, gpointer data)
 {
-	if (pending_store==NULL) return FALSE;
-	if (gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
+	if (pending_store!=NULL && gtk_list_store_iter_is_valid(pending_store, &current_pending)) {
 		gint pulse;
 		gtk_tree_model_get(GTK_TREE_MODEL(pending_store), &current_pending, 3, &pulse, -1);
 		if (pulse>=0) {
@@ -397,6 +396,12 @@ static int file_cmp(gconstpointer a, gconstpointer b)
 {
 	return g_ascii_strncasecmp(a, b, -1);
 }
+
+static int compare(const void * a, const void * b)
+{
+	return g_strcmp0(*(const gchar **) a, *(const gchar **) b);
+}
+
 
 static gboolean redefine_parent_iter(gchar *src, gboolean strict_mode)
 {
@@ -1268,6 +1273,26 @@ static gint index_and_search(gchar *name)
 	return ret;
 }
 
+static gchar *getworkdir (const gchar *com)
+{
+	gchar *workdir = g_strdup("");
+	char spath[PATH_MAX];
+	FILE *fp;
+	fp = popen(g_strdup_printf("command -v %s", com), "r");
+	if (fp == NULL) {
+		dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Error loading %s.", com);
+		return NULL;
+	}
+	while (fgets(spath, PATH_MAX, fp) != NULL)
+		workdir = g_strconcat(workdir, spath, NULL);
+	workdir = g_path_get_dirname(workdir);
+	if (pclose(fp)!=0) {
+		dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Error loading %s.", com);
+		return NULL;
+	}
+	return workdir;
+}
+
 static int auth_config()
 {
 	if (IS_CURRENT_PROFILE_SFTP) {
@@ -1307,8 +1332,10 @@ static int auth_config()
 					gchar **argv;
 					gchar *command;
 					command = g_strdup_printf("openssl s_client -connect %s:%s -showcerts -starttls ftp", current_profile.host, current_profile.port);
+					gchar *workdir = getworkdir("openssl");
+					if (workdir==NULL) return 1;
 					g_shell_parse_argv(command, NULL, &argv, NULL);
-					if (g_spawn_sync("/usr/bin", argv, NULL, G_SPAWN_LEAVE_DESCRIPTORS_OPEN, NULL, NULL, &result, NULL, NULL, &error)) {
+					if (g_spawn_sync(workdir, argv, NULL, G_SPAWN_LEAVE_DESCRIPTORS_OPEN, NULL, NULL, &result, NULL, NULL, &error)) {
 						if (to_abort) return 1;
 						gint ret = 1;
 						gdk_threads_enter();
@@ -1324,7 +1351,7 @@ static int auth_config()
 					} else {
 						gdk_threads_enter();
 						log_new_str(COLOR_RED, g_strdup_printf("Error: %s", error->message));
-						dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Unable to run /usr/bin/openssl to verify certificate. Make sure OpenSSL is properly installed.");
+						dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Unable to run %s/openssl to verify certificate. Make sure OpenSSL is properly installed.", workdir);
 						gdk_threads_leave();
 						g_error_free(error);
 						return 1;
@@ -4935,11 +4962,13 @@ static void change_encoding(gint type)
 	gchar *result = NULL;
 	gchar **argv;
 	gchar **sets;
+	gchar *workdir = getworkdir("iconv");
+	if (workdir==NULL) return;
 	g_shell_parse_argv("iconv -l", NULL, &argv, NULL);
-	if (g_spawn_sync("/usr/bin", argv, NULL, G_SPAWN_LEAVE_DESCRIPTORS_OPEN, NULL, NULL, &result, NULL, NULL, &error)) {
-		sets = g_regex_split_simple("//\n|/\n", result, 0, 0);
+	if (g_spawn_sync(workdir, argv, NULL, G_SPAWN_LEAVE_DESCRIPTORS_OPEN, NULL, NULL, &result, NULL, NULL, &error)) {
+		sets = g_regex_split_simple("//\n|/\n|\\s", result, 0, 0);
 	} else {
-		dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Error loading '/usr/bin/iconv' .");
+		dialogs_show_msgbox(GTK_MESSAGE_WARNING, "Error loading '%s/iconv' .", workdir);
 		return;
 	}
 	
@@ -4984,6 +5013,7 @@ static void change_encoding(gint type)
 	if (type==1 && pref.lstenc) strcmp = g_strdup(pref.lstenc);
 	if (type==2 && pref.cmdenc) strcmp = g_strdup(pref.cmdenc);
 	
+	qsort(sets, g_strv_length(sets), sizeof(gchar *), compare);
 	for (i = 0; i < g_strv_length(sets); i++) {
 		if (g_utf8_strlen(sets[i], -1)>0) {
 			gtk_tree_store_append(search_store, &iter, NULL);
