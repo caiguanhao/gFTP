@@ -5446,7 +5446,6 @@ GtkWidget *plugin_configure(GtkDialog *dialog)
 	gtk_entry_set_max_length(GTK_ENTRY(widget), 255);
 	gtk_table_attach(GTK_TABLE(table), widget, 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 2, 2);
 	g_signal_connect(widget, "key-release-event", G_CALLBACK(on_name_edited), dialog);
-	g_signal_connect(widget, "focus-out-event", G_CALLBACK(on_conf_host_focus_out), NULL);
 	pref.name = widget;
 	widget = gtk_button_new_with_mnemonic("_Organize...");
 	gtk_widget_set_tooltip_text(widget, "Organize profiles.");

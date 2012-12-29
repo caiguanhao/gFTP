@@ -134,7 +134,7 @@ Troubleshoot
    $ sudo add-apt-repository "deb http://ftp.cn.debian.org/debian wheezy main"
    $ sudo apt-get update
    $ sudo apt-cache policy libcurl3
-   if the candidate is from from http://ftp.cn.debian.org/... , you can run:
+   if the candidate is from http://ftp.cn.debian.org/... , you can run:
       $ sudo apt-get install libcurl3
    if NOT, you can install the unstable version:
       -> $ sudo add-apt-repository "deb http://ftp.cn.debian.org/debian sid main"
@@ -143,10 +143,12 @@ Troubleshoot
       -> $ sudo apt-get install libcurl3=7.26.0-1
    
    Another option is to build from source. (http://curl.haxx.se/download.html)
+      $ sudo apt-get purge libcurl3
+      $ sudo apt-get install libssl-dev libssh2-1-dev
       $ curl -O http://curl.haxx.se/download/curl-7.28.1.tar.gz
       $ tar xfvz curl-7.28.1.tar.gz
       $ cd curl-7.28.1
-      $ ./configure --with-libssh2
+      $ ./configure --with-ssl --with-libssh2
       $ make
       $ sudo make install
       $ make clean
