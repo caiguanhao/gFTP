@@ -26,8 +26,8 @@ clean:
 	rm -f gFTP*.so
 
 install:
-	$(SUDO) cp gFTP*.so $(libdir)
-	$(SUDO) chmod 644 $(libdir)/gFTP*.so
+	cp gFTP*.so $(libdir)
+	chmod 644 $(libdir)/gFTP*.so
 
 uninstall:
-	$(SUDO) rm -f $(libdir)/gFTP*.so
+	rm -f $(libdir)/gFTP*.so
